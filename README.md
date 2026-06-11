@@ -23,7 +23,7 @@ npx skills add elephant-xyz/skills --skill onboard-county
 Run the install from the directory where your agent works (skills land in
 `./.agents/skills/` and are picked up by Cursor, Claude Code, Codex, Amp, and others).
 
-## Typical workflow: onboarding a new county
+## Quickstart: onboarding a new county
 
 1. **Clone the repos.** Work happens in a checkout of `oracle-node` with sibling repos
    next to it:
