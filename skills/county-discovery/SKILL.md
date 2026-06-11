@@ -7,6 +7,11 @@ metadata:
 
 # County Discovery
 
+Before probing anything: confirm with the operator which appraisal/permit websites should
+be used (they may already know the portals), whether prior findings or sample captures
+exist, and that sending light traffic to the county sites is OK from the current network.
+If entered directly (not via `onboard-county`), also confirm `AWS_PROFILE`/`AWS_REGION`.
+
 Produce a county profile document before writing any code. The profile feeds every later
 stage: seed data, browser flow, transform scripts, permit adapter, eligibility mapping.
 

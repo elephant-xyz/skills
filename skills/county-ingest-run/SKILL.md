@@ -10,6 +10,10 @@ metadata:
 Prerequisites: `bootstrap-oracle-infra` checks pass; appraisal onboarding, transform
 validation, and the permit adapter are done for the county.
 
+Before starting any run, confirm with the operator: AWS profile/region, job-id, pilot vs
+full scope, and that the seed CSV in `counties-seeds` is the intended input. Starting a
+run sends sustained traffic to county websites — never do it implicitly.
+
 ## Run shape
 
 Property-first: each parcel flows appraisal-prepare → transform (Structured Archive) →

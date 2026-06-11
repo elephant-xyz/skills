@@ -1,6 +1,6 @@
 ---
 name: onboard-county
-description: Orchestrate end-to-end onboarding of a new US county into the elephant oracle-node ingestion pipeline, sequencing discovery, seed data, appraisal, transform validation, permit adapter, run, and enrichment stages. Use when asked to onboard, ingest, or "do the same as Lee County" for a new county, or when unsure which county skill applies.
+description: Orchestrate end-to-end onboarding of a new US county into the elephant oracle-node ingestion pipeline - starting with a mandatory operator intake (AWS profile, seed data, existing scripts, sources), then sequencing discovery, seed data, appraisal, transform validation, permit adapter, run, and enrichment stages. Use when asked to onboard, ingest, or "do the same as Lee County" for a new county, or when unsure which county skill applies.
 metadata:
   author: elephant-xyz
 ---
@@ -11,6 +11,31 @@ End-to-end recipe for replicating the Lee County, FL ingestion for any county. E
 has a dedicated skill — read the stage skill before executing that stage. Work happens in
 a checkout of `oracle-node` with sibling repos `elephant-query-db`,
 `Counties-trasform-scripts`, and `lexicon`.
+
+## Intake — REQUIRED before doing anything
+
+Do NOT run commands, scrape, deploy, or modify files until the operator has answered the
+intake questions and confirmed the plan. Ask (in one batch, multiple-choice where the
+tooling supports it):
+
+1. **AWS access** — which `AWS_PROFILE` and `AWS_REGION`? Existing deployed stacks
+   (`elephant-oracle-node`, `elephant-permit-harvest`) or a fresh account?
+2. **Seed data** — do you already have a parcel list / seed CSV for this county (local
+   file or `s3://counties-seeds/<county>.csv`)? If not, do you know the county's bulk
+   parcel-roll source, or should I research one?
+3. **Existing assets** — are there already: transform scripts for this county in
+   `Counties-trasform-scripts`? A browser flow in `browser-flows/`? A permit adapter or
+   prior findings doc in `docs/`? (Check the repos yourself, then confirm what you found
+   with the operator before relying on it.)
+4. **Sources** — which websites should be used for appraisal data and for permits? Any
+   known portals, or should discovery determine them? Any sources to explicitly avoid?
+5. **Scope** — pilot only (10-50 parcels) or full county run? Commercial-first
+   prioritization? Which enrichments (Sunbiz, BBB)?
+6. **Database** — load into the existing Neon query DB, or a different target?
+
+Restate the answers as a short written plan (stages, county key, job-id prefix, sources)
+and get explicit approval. Only then start Stage 1. Re-confirm before any
+deployment or any action that sends traffic to county websites.
 
 ## Target outcome
 

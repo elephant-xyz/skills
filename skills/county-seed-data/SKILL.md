@@ -10,6 +10,9 @@ metadata:
 The entire pipeline is driven by one CSV per county in the seeds bucket:
 `s3://counties-seeds/<county>.csv`. One row per parcel.
 
+First ask the operator: do they already have a seed CSV or a preferred parcel-roll source
+for this county? Check `s3://counties-seeds/` for an existing file before producing one.
+
 ## Required columns
 
 The pre-processor and seed feeder read:
