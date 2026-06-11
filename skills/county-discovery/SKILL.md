@@ -20,7 +20,8 @@ stage: seed data, browser flow, transform scripts, permit adapter, eligibility m
 Write findings to `oracle-node/docs/<county>-county-findings.md`. Required sections:
 
 1. **Appraiser portal** — base URL, per-parcel detail URL pattern, search mechanism,
-   whether plain HTTP fetch works or a real browser is required, CAPTCHA/Cloudflare posture.
+   access mode per artifact (plain fetch / modified request replaying a hidden API /
+   real browser), CAPTCHA/Cloudflare posture.
 2. **Parcel identifier** — official name (STRAP, PCN, folio…), format, punctuation,
    numeric-only variants, how it appears on appraiser vs permit portals (often different).
 3. **Permit portal** — vendor (Accela, Tyler, ePZB, custom), search-by-parcel support,
@@ -52,10 +53,10 @@ Write findings to `oracle-node/docs/<county>-county-findings.md`. Required secti
    building/permit offices with links to their official sites. Use it to find the
    appraiser portal, permit portal, and bulk-download pages instead of guessing URLs;
    verify each linked site is the current official one.
-3. Probe the appraiser portal with a real parcel id (get a few from the county GIS/open
-   data). Test plain `curl` first, then a headless browser. Record which works — several
-   FL portals block curl but allow Chromium (Palm Beach permit portal requires a
-   Playwright session via `iPZB.Building/Session` before API calls work).
+3. Probe each source with a real parcel id (get a few from the county GIS/open data).
+   Always explore with Playwright, even when `curl` works — see "Exploring with
+   Playwright" below. Record per source: curl-only / curl-partial / browser-required,
+   and the full inventory of data the browser reveals.
 4. Identify the permit vendor by URL shape:
    - `*.accela.com/<AGENCY>/...` → Accela Citizen Access. Record the agency code, module
      name (usually `Permitting`), and record-number prefixes (used to classify record types).
@@ -67,6 +68,36 @@ Write findings to `oracle-node/docs/<county>-county-findings.md`. Required secti
    permit adapter.
 6. Florida-specific: Sunbiz corporate data is statewide — only the county ZIP-prefix list
    is new. Collect the county's ZIP codes.
+
+## Exploring with Playwright
+
+Never conclude a source's data inventory from `curl` output alone. A `curl` probe answers
+"is there bot protection?", not "what data exists". The failure modes it hides:
+
+- **Blocked outright** — Cloudflare/bot challenges return errors or challenge pages while
+  a real browser works (Palm Beach permits require a Playwright session via
+  `iPZB.Building/Session` before its API answers; Sunbiz blocks curl entirely).
+- **Partial data** — the initial HTML loads fine but tabs, accordions, "more details"
+  expanders, and lazy/XHR-loaded sections (valuations, sales history, permits tab, photos,
+  cost cards) only materialize after JS runs or a click. Lee's Accela detail pages and
+  appraiser cost cards are examples — the richest data sat behind expanders.
+- **Hidden APIs** — the page is driven by JSON endpoints that curl CAN fetch, but only
+  with the right headers/cookies/POST body discovered from browser traffic.
+
+For every page type (search results, detail page, each tab):
+
+1. Open it in Playwright; wait for network idle; click through every tab/expander/
+   pagination control; scroll to trigger lazy loads.
+2. Record all network requests (`page.on('request'/'response')` or HAR) and identify the
+   underlying data endpoints — JSON APIs are preferable scrape targets over HTML.
+3. Diff what the rendered DOM contains vs the raw `curl` HTML of the same URL; anything
+   browser-only must be captured by the browser flow or via the discovered endpoint with
+   a modified request (copy headers, cookies, session bootstrap, POST params).
+4. Document per source: required session/bootstrap steps, endpoints + required
+   headers/params, and which artifacts need a real browser vs a modified plain request.
+
+This inventory feeds `validate-county-transform` — fields missed here become silent
+coverage gaps later.
 
 ## Reference example
 
