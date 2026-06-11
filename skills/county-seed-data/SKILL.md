@@ -35,7 +35,9 @@ Preference order for Florida counties:
    published yearly; reliable fallback with consistent columns.
 3. **County GIS / open-data portal** — parcel layers exportable to CSV.
 
-For non-FL states, use the county/state equivalent of 1 or 3.
+For non-FL states, use the county/state equivalent of 1 or 3. To locate the official
+offices and their download pages, start from the NETR Online directory:
+`https://publicrecords.netronline.com/state/<STATE>/county/<county>`.
 
 ## Workflow
 

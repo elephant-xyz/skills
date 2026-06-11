@@ -39,20 +39,26 @@ Write findings to `oracle-node/docs/<county>-county-findings.md`. Required secti
      `github.com/elephant-xyz/Counties-trasform-scripts` — if transform scripts exist,
      the appraisal side has been at least partially solved before.
    - `browser-flows/` for an existing flow JSON for the county.
-2. Probe the appraiser portal with a real parcel id (get a few from the county GIS/open
+2. Enumerate official data sources via the NETR Online directory:
+   `https://publicrecords.netronline.com/state/<STATE>/county/<county>` — it lists the
+   county's assessor/appraiser, recorder, tax collector, GIS/mapping, and
+   building/permit offices with links to their official sites. Use it to find the
+   appraiser portal, permit portal, and bulk-download pages instead of guessing URLs;
+   verify each linked site is the current official one.
+3. Probe the appraiser portal with a real parcel id (get a few from the county GIS/open
    data). Test plain `curl` first, then a headless browser. Record which works — several
    FL portals block curl but allow Chromium (Palm Beach permit portal requires a
    Playwright session via `iPZB.Building/Session` before API calls work).
-3. Identify the permit vendor by URL shape:
+4. Identify the permit vendor by URL shape:
    - `*.accela.com/<AGENCY>/...` → Accela Citizen Access. Record the agency code, module
      name (usually `Permitting`), and record-number prefixes (used to classify record types).
    - Otherwise capture the search flow with browser devtools and note the JSON/HTML
      endpoints.
-4. Capture 3-5 sample permit detail pages and 3-5 appraisal pages covering different
+5. Capture 3-5 sample permit detail pages and 3-5 appraisal pages covering different
    property types (commercial, industrial, residential, condo, vacant) — save HTML to
    `downloads/<county>/samples/`. These become fixtures for transform validation and the
    permit adapter.
-5. Florida-specific: Sunbiz corporate data is statewide — only the county ZIP-prefix list
+6. Florida-specific: Sunbiz corporate data is statewide — only the county ZIP-prefix list
    is new. Collect the county's ZIP codes.
 
 ## Reference example
