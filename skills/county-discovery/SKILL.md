@@ -39,6 +39,12 @@ Write findings to `oracle-node/docs/<county>-county-findings.md`. Required secti
    offer, not the ceiling.
 7. **Risks** — geo-blocking, bot challenges, throttling expectations.
 
+When the profile is complete, commit it and push a copy to
+`github.com/elephant-xyz/Counties-trasform-scripts` under `<county>/docs/` on a branch,
+and open a PR (`gh pr create`) so the findings survive outside this machine. Include any
+probe/exploration scripts you wrote; reference (don't commit) large sample captures by
+their S3 or `downloads/` location.
+
 ## Workflow
 
 1. Check prior art first:

@@ -52,7 +52,9 @@ hyphens).
 1. If the county folder EXISTS: do not trust it blindly. Run the `validate-county-transform`
    skill against fresh prepare captures covering data variability. Fix gaps before scaling.
 2. If it does NOT exist: author a transform v2 handler package — use the
-   `transform-v2-builder` skill — then validate the same way.
+   `transform-v2-builder` skill — then validate the same way. New or changed scripts must
+   be committed on a branch and PR'd to `Counties-trasform-scripts` (`gh pr create`) —
+   never left only in a local checkout or only synced to S3.
 3. The transform must emit `data/property.json` with `property_usage_type`; the
    post-transform permit-eligibility branch reads it.
 

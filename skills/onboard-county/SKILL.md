@@ -81,7 +81,26 @@ Track progress in `oracle-node/docs/<county>-county-findings.md`.
    `bbb-harvest` (national; refresh as needed).
 10. **Reconcile & wrap-up** — `query-db-loading-matching` verification queries; record
     final counts; commit code/docs (never data) on a `<county>-property-first-ingest`
-    branch.
+    branch; confirm every artifact-persistence PR (see ground rule below) is open and
+    linked from the findings doc.
+
+## Persist artifacts — commit + PR, nothing lives only on disk
+
+Everything county- or data-source-specific that you create — findings docs, sample
+captures inventory, transform scripts, extraction/harvest scripts, local runners, ZIP
+lists, mapping notes — must be committed and pushed as you go, not at the end:
+
+- **Transform scripts, county scripts, findings/docs** → branch + PR against
+  `github.com/elephant-xyz/Counties-trasform-scripts`, under the county folder
+  (`<county>/scripts/`, `<county>/docs/`). Data-source-specific work that isn't tied to
+  one county (Sunbiz, BBB) goes in a source-named folder there too.
+- **Worker/pipeline code** (permit adapters, queue wiring, state-machine changes) →
+  `oracle-node` on the `<county>-property-first-ingest` branch.
+
+Open the PR with `gh pr create` as soon as a stage's artifacts are complete — don't wait
+for the whole onboarding to finish. One PR per stage or logical unit is fine. Never
+commit scraped data, secrets, or large captures; samples go in the PR only if small
+(<1 MB), otherwise document their S3 location. Record each PR URL in the findings doc.
 
 ## Ground rules (learned from the Lee run)
 

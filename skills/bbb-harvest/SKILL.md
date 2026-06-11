@@ -52,3 +52,7 @@ Useful flags (see `--help` for the full set):
 
 Tests for the harvester live at `tests/scripts/harvest-bbb-category.test.mjs` — keep them
 passing if the script is modified.
+
+Script changes are committed in `oracle-node`. Category lists, run notes, and any
+source-specific docs produced for a county or category also get committed and PR'd to
+`github.com/elephant-xyz/Counties-trasform-scripts` (`gh pr create`) so they aren't lost.

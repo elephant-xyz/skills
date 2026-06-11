@@ -76,3 +76,10 @@ have accumulated for the county.
 - `corevent.zip` (filing-history events) is not ingested — separate scope.
 - `party_type_code` decoding is incomplete; officers are not normalized to person/company.
 - Unmapped fields are intentionally preserved in the output for future lexicon expansion.
+
+## Persist your work
+
+Extraction/transform scripts live in `oracle-node` (commit on the county branch). Any new
+docs, ZIP-prefix lists, or mapping notes produced for a county also get committed and
+PR'd to `github.com/elephant-xyz/Counties-trasform-scripts` under `<county>/docs/`
+(`gh pr create`) so they survive outside this machine.

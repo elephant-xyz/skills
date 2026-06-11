@@ -56,6 +56,8 @@ Record in `oracle-node/docs/<county>-county-findings.md`:
   exception list
 - assertion that no class-(a)/(b) gaps remain
 
-Only then proceed to `county-ingest-run`. If transform scripts changed, push them to
-`Counties-trasform-scripts` and re-sync to S3 (deploy with `UPLOAD_TRANSFORMS=true` or the
-GitHub sync function) — the deployed worker uses S3, not your local checkout.
+Only then proceed to `county-ingest-run`. If transform scripts changed, commit them on a
+branch and open a PR against `Counties-trasform-scripts` (`gh pr create`), then re-sync
+to S3 (deploy with `UPLOAD_TRANSFORMS=true` or the GitHub sync function) — the deployed
+worker uses S3, not your local checkout. Include the validation report and any comparison
+scripts in the same PR so the coverage evidence isn't lost.

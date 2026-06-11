@@ -71,3 +71,11 @@ Study `lee-accela.mjs` + the `lee-property-first-permit-parcel` handler in `inde
   follow the worker's partial-batch-response pattern, and prefer recording a failure entry
   over throwing.
 - DLQ has `maxReceiveCount: 5`; check it after any deploy.
+
+## Persist your work
+
+Adapter + worker changes are committed in `oracle-node` on the county branch. Anything
+that lives outside oracle-node's deploy path — local runner scripts, portal exploration
+notes, endpoint/session documentation — gets committed and PR'd to
+`github.com/elephant-xyz/Counties-trasform-scripts` under `<county>/` (`gh pr create`)
+so it isn't lost when this machine moves on.
