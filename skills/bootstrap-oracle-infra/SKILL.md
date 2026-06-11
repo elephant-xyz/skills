@@ -12,8 +12,9 @@ checkout of `elephant-query-db` is needed for Neon access.
 
 All AWS commands require `AWS_PROFILE` and `AWS_REGION` to be set. Never hardcode account
 IDs. If the operator has not specified profile/region, ask before running anything —
-do not guess from `~/.aws/config`. Verification (read-only) may proceed once the profile
-is confirmed; any CREATE/deploy action needs explicit operator approval.
+do not guess from `~/.aws/config`. Once the profile is known, proceed with verification
+and bootstrapping without further check-ins; ask only if something genuinely ambiguous
+comes up (e.g. multiple candidate secrets/buckets, or costs beyond the established scope).
 
 ## Verification checklist
 

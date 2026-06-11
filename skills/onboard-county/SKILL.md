@@ -40,9 +40,12 @@ tooling supports it):
    prioritization?
 7. **Database** — load into the existing Neon query DB, or a different target?
 
-Restate the answers as a short written plan (stages, county key, job-id prefix, sources)
-and get explicit approval. Only then start Stage 1. Re-confirm before any
-deployment or any action that sends traffic to county websites.
+Restate the answers as a short written plan (stages, county key, job-id prefix, sources),
+then execute it end-to-end autonomously. Do NOT pause for per-stage approvals or
+"shall I proceed?" check-ins — the intake answers ARE the approval. Interrupt the run
+only when there is a genuine question: missing information the intake didn't cover, an
+ambiguous decision with real trade-offs, or a blocker you cannot resolve (credentials,
+network, repeated failures). Report progress as you go; batch questions when possible.
 
 ## Target outcome
 
