@@ -44,7 +44,9 @@ Useful flags (see `--help` for the full set):
    categories for permit contractor matching).
 2. Run a small probe (`--max-pages 2`) to confirm challenge handling works from the
    current network; BBB serves bot challenges that the script retries through, but
-   datacenter IPs may need `--headless false` or a different egress.
+   datacenter IPs may need `--headless false` or a different egress. If pages come back
+   403/blocked, check the egress country (`curl -s ipinfo.io/country`) — a US VPN/proxy
+   exit may be required before anything else is worth debugging.
 3. Run the full category with conservative delays; the crawler is resumable via
    `--start-page` and stable output parts.
 4. Reconcile `summary.json` counts vs profiles parts, retry failures.

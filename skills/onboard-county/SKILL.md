@@ -111,6 +111,11 @@ commit scraped data, secrets, or large captures; samples go in the PR only if sm
   `ON CONFLICT` merges. Resume = re-send the same message.
 - Be gentle with county portals: low permit concurrency (2-4), stepwise ramp-up with
   burn-in, back off on timeouts.
+- Geo-blocking: county/state portals often 403 or block non-US IPs outright. When any
+  source returns blocked/403/blank pages locally, check the egress country first
+  (`curl -s ipinfo.io/country`) and, if not US, ask the operator to run through a US
+  VPN/proxy before debugging anything else. Lambda workers run from US AWS regions and
+  are unaffected; this applies to local probing and local runners.
 - Never dump a whole county into SQS; use the backpressure-aware seed feeder.
 - If ingestion stalls silently, check event-source mappings first (budget-handler
   incident); `EmergencyStopEnabled` stays `false`.

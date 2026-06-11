@@ -89,6 +89,13 @@ Never conclude a source's data inventory from `curl` output alone. A `curl` prob
   appraiser cost cards are examples — the richest data sat behind expanders.
 - **Hidden APIs** — the page is driven by JSON endpoints that curl CAN fetch, but only
   with the right headers/cookies/POST body discovered from browser traffic.
+- **Geo-blocking** — many county/state portals serve 403s, "Access Denied", or blank
+  block pages to non-US IPs, in both curl AND a real browser. Before concluding a source
+  is bot-protected or broken, verify the current egress IP is in the US
+  (`curl -s ipinfo.io/country`). If it isn't, have the operator switch to a US VPN/proxy
+  exit and re-probe; tell them explicitly that a US IP is required for this source.
+  Distinguish geo-blocks from bot challenges in the findings — they need different
+  mitigations (egress location vs browser automation).
 
 For every page type (search results, detail page, each tab):
 
