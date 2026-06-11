@@ -20,6 +20,56 @@ npx skills add elephant-xyz/skills --all -y
 npx skills add elephant-xyz/skills --skill onboard-county
 ```
 
+Run the install from the directory where your agent works (skills land in
+`./.agents/skills/` and are picked up by Cursor, Claude Code, Codex, Amp, and others).
+
+## Typical workflow: onboarding a new county
+
+1. **Clone the repos.** Work happens in a checkout of `oracle-node` with sibling repos
+   next to it:
+
+```bash
+mkdir elephant && cd elephant
+git clone https://github.com/elephant-xyz/oracle-node
+git clone https://github.com/elephant-xyz/Counties-trasform-scripts
+git clone https://github.com/elephant-xyz/elephant-query-db
+git clone https://github.com/elephant-xyz/lexicon   # optional, for lexicon-gap work
+cd oracle-node && npm install
+```
+
+2. **Install the skills** into the `oracle-node` checkout:
+
+```bash
+npx skills add elephant-xyz/skills --all -y
+```
+
+3. **Prerequisites.** An AWS profile with access to the target account (existing
+   `elephant-oracle-node` stack or permissions to deploy one), `gh` authenticated for
+   PRs, Node 22+, and — for local portal probing — a US egress IP (VPN/proxy if you are
+   outside the US; many county portals geo-block).
+
+4. **Prompt the agent.** Open your agent in the `oracle-node` checkout and start with
+   something like:
+
+> Onboard Palm Beach county, FL into the oracle-node pipeline using the
+> `onboard-county` skill. Start with a pilot of ~25 parcels.
+
+   The skill begins with an intake (AWS profile/region, seed data, existing assets,
+   sources, additional data sources like Sunbiz/BBB, scope, target DB). Answer once;
+   after that it runs all stages autonomously — discovery, seed CSV, appraisal wiring,
+   transform validation, permit adapter, pilot run, full run, enrichment, query-DB
+   reconciliation — interrupting only for genuine blockers.
+
+   You can also invoke any stage skill directly, e.g.:
+
+> Run the `county-discovery` skill for Hillsborough county, FL.
+
+> Use `monitoring-county-ingestion` to report current Palm Beach ingestion status.
+
+5. **Results.** Findings docs and county scripts get PR'd to
+   `Counties-trasform-scripts`; pipeline code lands on a `<county>-property-first-ingest`
+   branch of `oracle-node`; data flows to S3 and the Neon query DB.
+
 ## Skills
 
 | Skill | Purpose |
