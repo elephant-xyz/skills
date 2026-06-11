@@ -29,7 +29,14 @@ Write findings to `oracle-node/docs/<county>-county-findings.md`. Required secti
 4. **Bulk data sources** — county parcel roll download (seed source), GIS/open-data portals.
 5. **Usage-type vocabulary** — the appraiser's property use codes/labels, and which map to
    commercial/industrial (drives permit-harvest eligibility).
-6. **Risks** — geo-blocking, bot challenges, throttling expectations.
+6. **Additional data sources** — inventory what else is available for the county (the
+   NETR directory step surfaces most of these): business registrations (Sunbiz for FL),
+   contractor reputation (BBB), tax collector rolls, recorder/official records (deeds,
+   mortgages, liens), GIS/parcel geometry, code enforcement, business licenses. For each:
+   URL, bulk-download availability, and whether the operator wants it in scope. Lee
+   shipped with two beyond appraisal+permits (Sunbiz, BBB); treat that as the baseline to
+   offer, not the ceiling.
+7. **Risks** — geo-blocking, bot challenges, throttling expectations.
 
 ## Workflow
 

@@ -29,9 +29,16 @@ tooling supports it):
    with the operator before relying on it.)
 4. **Sources** — which websites should be used for appraisal data and for permits? Any
    known portals, or should discovery determine them? Any sources to explicitly avoid?
-5. **Scope** — pilot only (10-50 parcels) or full county run? Commercial-first
-   prioritization? Which enrichments (Sunbiz, BBB)?
-6. **Database** — load into the existing Neon query DB, or a different target?
+5. **Additional data sources** — beyond appraisal and permits, which other sources should
+   this county get? Lee used two: Sunbiz corporate registrations (FL statewide) and BBB
+   contractor reputation. Offer those plus other candidates the operator may want to
+   incorporate — tax collector/payment rolls, recorder/official records (deeds,
+   mortgages, liens), GIS/parcel geometry, code enforcement, business licenses — and ask
+   for any sources not on this list. New source types need their own harvest/transform
+   plan; flag that as added scope.
+6. **Scope** — pilot only (10-50 parcels) or full county run? Commercial-first
+   prioritization?
+7. **Database** — load into the existing Neon query DB, or a different target?
 
 Restate the answers as a short written plan (stages, county key, job-id prefix, sources)
 and get explicit approval. Only then start Stage 1. Re-confirm before any
