@@ -82,7 +82,12 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-START_UTC="$(date -u -d "${WINDOW_MINUTES} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
+# Portable UTC window start: BSD/macOS `date -v` first, GNU `date -d` fallback.
+if date -u -v-1M +%Y-%m-%dT%H:%M:%SZ >/dev/null 2>&1; then
+  START_UTC="$(date -u -v-"${WINDOW_MINUTES}"M +%Y-%m-%dT%H:%M:%SZ)"
+else
+  START_UTC="$(date -u -d "${WINDOW_MINUTES} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
+fi
 
 queue_attrs() {
   local queue_url="$1"
