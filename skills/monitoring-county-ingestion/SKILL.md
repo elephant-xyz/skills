@@ -23,11 +23,18 @@ AWS_PROFILE=<profile> AWS_REGION=<region> \
 
 Paths are relative to this skill's directory.
 
+**Permit job prefix is auto-detected.** By default the script auto-detects the latest active
+`permit-harvest/<county>-property-first-seed/<jobId>` prefix, so permit counts always reflect
+the *current* run (not a stale hardcoded job). Use `--job-id <job-id>` to force a specific
+property-first seed run. It falls back to `PERMIT_JOB_PREFIX` only when no active prefix is
+found. (This prevents the stale-prefix bug where a finished job's counts get reported as if
+they were the live run's.)
+
 ## Workflow
 
 1. Run `scripts/ingestion-status.sh`. It reports, per county: appraisal queue depth +
    delete rate + event-source state/concurrency, permit queue + DLQ, S3 artifact counts
-   for the current job prefix, and (optionally) the Sunbiz transform summary.
+   for the resolved job prefix, and (optionally) the Sunbiz transform summary.
 2. Treat SQS counts as approximate (1-minute metric resolution; in-flight messages hidden
    during visibility timeout).
 3. ETAs:

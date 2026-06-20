@@ -57,7 +57,6 @@ fi
 
 BUCKET="${BASH_REMATCH[1]}"
 PREFIX="${BASH_REMATCH[2]}"
-# Portable UTC cutoff: BSD/macOS `date -v` first, GNU `date -d` fallback.
 if date -u -v-1M +%Y-%m-%dT%H:%M:%S >/dev/null 2>&1; then
   CUTOFF="$(date -u -v-"${WINDOW_MINUTES}"M +%Y-%m-%dT%H:%M:%S)"
 else
