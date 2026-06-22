@@ -51,7 +51,8 @@ Useful flags (see `--help` for the full set):
    safe concurrency. If the estimate is more than 48 hours, ask whether to download BBB
    artifacts anyway, ingest them into the query DB, or retrieve BBB profile data at
    runtime from the owning app/service. For runtime retrieval, capture the expected API or
-   scrape path, cache/freshness needs, and failure behavior.
+   scrape path, cache/freshness needs, and failure behavior. Stop here if the operator
+   chose ingest-only or runtime retrieval — do not proceed to step 4.
 4. Run the full category with conservative delays; the crawler is resumable via
    `--start-page` and stable output parts.
 5. Reconcile `summary.json` counts vs profiles parts, retry failures.

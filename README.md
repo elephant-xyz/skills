@@ -59,7 +59,7 @@ npx skills add elephant-xyz/skills --all -y
    after that it runs all stages autonomously — discovery, seed CSV, appraisal wiring,
    transform validation, permit adapter, source feasibility, pilot run, full run,
    enrichment, query-DB reconciliation — interrupting only for genuine blockers. Sources
-   that would take more than two days to fully download trigger an explicit choice:
+   that would take more than 48 hours to fully download trigger an explicit choice:
    download anyway, ingest into the database, or retrieve from the owning app at runtime.
 
    You can also invoke any stage skill directly, e.g.:

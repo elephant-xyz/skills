@@ -44,8 +44,8 @@ raise while watching errors — Lee sustained 50+, but only after burn-in).
 
 Before scaling beyond smoke tests, use the `county-discovery` source-feasibility estimate
 or pilot timings from `county-ingest-run`. If the full appraisal download is estimated
-above 48 hours, ask the operator whether to continue the scrape, ingest only approved
-artifacts into the query DB, or move this source to runtime retrieval in an owning app.
+above 48 hours, ask the operator whether to continue the scrape, ingest records into
+the query DB, or move this source to runtime retrieval in an owning app.
 
 ## 3. Transform scripts (reuse first)
 
