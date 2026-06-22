@@ -1,6 +1,6 @@
 ---
 name: bbb-harvest
-description: Harvest BBB (Better Business Bureau) business profiles by category for contractor reputation and quality enrichment in the elephant query DB. Use when asked to collect BBB profiles, contractor reputation data, or refresh bbb_* tables.
+description: Harvest BBB (Better Business Bureau) business profiles by category for contractor reputation and quality enrichment in the elephant query DB, with throughput checks before long crawls. Use when asked to collect BBB profiles, contractor reputation data, or refresh bbb_* tables.
 metadata:
   author: elephant-xyz
 ---
@@ -47,10 +47,16 @@ Useful flags (see `--help` for the full set):
    datacenter IPs may need `--headless false` or a different egress. If pages come back
    403/blocked, check the egress country (`curl -s ipinfo.io/country`) — a US VPN/proxy
    exit may be required before anything else is worth debugging.
-3. Run the full category with conservative delays; the crawler is resumable via
+3. Estimate total crawl time from probe latency, page/profile counts, delays, retries, and
+   safe concurrency. If the estimate is more than 48 hours, ask whether to download BBB
+   artifacts anyway, ingest them into the query DB, or retrieve BBB profile data at
+   runtime from the owning app/service. For runtime retrieval, capture the expected API or
+   scrape path, cache/freshness needs, and failure behavior. Stop here if the operator
+   chose ingest-only or runtime retrieval — do not proceed to step 4.
+4. Run the full category with conservative delays; the crawler is resumable via
    `--start-page` and stable output parts.
-4. Reconcile `summary.json` counts vs profiles parts, retry failures.
-5. Load into Neon `bbb_*` tables per the `query-db-loading-matching` skill.
+5. Reconcile `summary.json` counts vs profiles parts, retry failures.
+6. Load into Neon `bbb_*` tables per the `query-db-loading-matching` skill.
 
 Tests for the harvester live at `tests/scripts/harvest-bbb-category.test.mjs` — keep them
 passing if the script is modified.

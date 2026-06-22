@@ -1,6 +1,6 @@
 ---
 name: county-permit-adapter
-description: Build a new county's permit-portal harvester for the oracle-node permit-harvest worker, by adapting the Lee Accela adapter or writing a new vendor module. Use when onboarding a county's permit portal, adding permit message types, or debugging per-parcel permit harvest for a county.
+description: Build a new county's permit-portal harvester for the oracle-node permit-harvest worker, by adapting the Lee Accela adapter or writing a new vendor module, including source throughput checks and bulk-harvest vs runtime-retrieval decisions. Use when onboarding a county's permit portal, adding permit message types, or debugging per-parcel permit harvest for a county.
 metadata:
   author: elephant-xyz
 ---
@@ -59,6 +59,11 @@ Study `lee-accela.mjs` + the `lee-property-first-permit-parcel` handler in `inde
   per county for local Puppeteer runs against a handful of parcels, including:
   a parcel known to have permits, a permit-less parcel (must complete cleanly, not retry),
   and a parcel whose detail page shows extra/related records.
+- Add a benchmark mode or short probe run before any full harvest. Measure permit search,
+  list extraction, detail capture, session bootstrap, retry/failure rate, and bytes written
+  for a representative parcel sample. Estimate countywide elapsed time from eligible parcel
+  count, expected permits per parcel, measured latency, safe concurrency, required delays,
+  and retry overhead.
 - `npm run typecheck` and `npm run test` (worker has vitest suites — add county tests
   mirroring `tests/workflow/lambdas/permit-harvest-worker/lee-accela.test.mjs`).
 - Deploy worker code, send ONE SQS message manually, watch logs.
@@ -67,6 +72,12 @@ Study `lee-accela.mjs` + the `lee-property-first-permit-parcel` handler in `inde
 
 - Start `MaximumConcurrency` at 2; raise one step at a time while watching for portal
   timeouts. Lee Accela degraded above ~4; assume new portals are equally fragile.
+- Before scaling beyond the pilot, record the portal's safe concurrency and the estimated
+  full permit-download time in the county findings doc. If the estimate is more than
+  48 hours, stop and ask whether permits should be downloaded anyway, ingested into the
+  query DB, or retrieved at runtime. For runtime retrieval, ask which app/service owns it
+  and whether lookup should use direct portal/API calls, server-side scraping, cache,
+  queued background fetch, or another pattern.
 - Per-record page-wait timeouts that fail an entire batch are worse than skipping —
   follow the worker's partial-batch-response pattern, and prefer recording a failure entry
   over throwing.

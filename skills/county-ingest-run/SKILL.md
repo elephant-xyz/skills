@@ -1,6 +1,6 @@
 ---
 name: county-ingest-run
-description: Deploy and run the end-to-end property-first ingestion for an onboarded county - pilot batch first, then the full backpressure-aware seed-feeder run with concurrency ramp-up. Use when starting, scaling, resuming, or wrapping up a county ingestion run on AWS.
+description: Deploy and run the end-to-end property-first ingestion for an onboarded county - pilot batch first, source-feasibility gate, then the full backpressure-aware seed-feeder run with concurrency ramp-up. Use when starting, scaling, resuming, or wrapping up a county ingestion run on AWS.
 metadata:
   author: elephant-xyz
 ---
@@ -35,8 +35,24 @@ retention and removes flow control).
    (`properties`, permit tables) → completion-state object written.
 4. Verify a permit-less parcel completes cleanly and a residential parcel stops after
    archive with a skip marker.
+5. Use pilot timings to refresh each source ETA in the findings doc. Include observed
+   latency, safe concurrency, retry/failure rate, and estimated full-download time.
 
-## 2. Full run
+## 2. Feasibility gate before full run
+
+Before starting a full run, review every source that will be scraped or downloaded:
+
+- If the estimated full-download time is 48 hours or less, proceed using the measured safe
+  concurrency and backpressure settings.
+- If any source is estimated above 48 hours, do not scale it by default. Ask the operator
+  whether to download artifacts anyway, ingest the source into the query DB, or retrieve
+  it at runtime.
+- If runtime retrieval is selected, ask which app/service owns the lookup and what the
+  runtime path should be: direct API call, server-side scrape, cached lookup, queued
+  background fetch, or another pattern. Record freshness, latency, cache invalidation, and
+  failure behavior before changing run scope.
+
+## 3. Full run
 
 Send the seed-feeder message (type `<county>-property-first-seed-feeder`) to the
 permit-harvest queue. Key message fields (see `validatePermitHarvestMessage()` for the
@@ -55,7 +71,7 @@ The feeder checkpoints at `permit-harvest/<jobId>/feeder-state.json` (row offset
 self-requeues until `sourceExhausted`. Resume = send the same message again; the
 checkpoint prevents re-queuing.
 
-## 3. Ramp-up
+## 4. Ramp-up
 
 1. Watch with `monitoring-county-ingestion` after each change; let each setting burn in
    10+ minutes before the next.
@@ -65,7 +81,7 @@ checkpoint prevents re-queuing.
 4. Check after every step: Lambda `Errors`/`Throttles` = 0, DLQ depth = 0, Neon insert
    rate moving, app-level prepare failure rate not climbing.
 
-## 4. Failure handling
+## 5. Failure handling
 
 - DLQ messages: inspect, fix root cause, redrive (`scripts/auto-fix-queue.sh`,
   `scripts/resolve-error.sh`; error records in DynamoDB clear via `ElephantErrorResolved`).
@@ -76,7 +92,7 @@ checkpoint prevents re-queuing.
 - Geo-block/outage: prepare failures spike — pause (disable mapping), restore network/VPN
   or proxies, re-enable; SQS redelivery resumes work.
 
-## 5. Wrap-up
+## 6. Wrap-up
 
 - Feeder reports `sourceExhausted`; queues drain to 0; reconcile counts: seed rows vs
   archived artifacts vs Neon properties vs permit-eligible vs permits loaded. Record final
