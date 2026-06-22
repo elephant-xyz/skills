@@ -1,6 +1,6 @@
 ---
 name: onboard-county
-description: Orchestrate end-to-end onboarding of a new US county into the elephant oracle-node ingestion pipeline - starting with a mandatory operator intake (AWS profile, seed data, existing scripts, sources), then sequencing discovery, seed data, appraisal, transform validation, permit adapter, run, and enrichment stages. Use when asked to onboard, ingest, or "do the same as Lee County" for a new county, or when unsure which county skill applies.
+description: Orchestrate end-to-end onboarding of a new US county into the elephant oracle-node ingestion pipeline - starting with a mandatory operator intake (AWS profile, seed data, existing scripts, sources), then sequencing discovery, source feasibility, seed data, appraisal, transform validation, permit adapter, run, runtime-retrieval decisions, and enrichment stages. Use when asked to onboard, ingest, or "do the same as Lee County" for a new county, or when unsure which county skill applies.
 metadata:
   author: elephant-xyz
 ---
@@ -35,7 +35,8 @@ tooling supports it):
    incorporate — tax collector/payment rolls, recorder/official records (deeds,
    mortgages, liens), GIS/parcel geometry, code enforcement, business licenses — and ask
    for any sources not on this list. New source types need their own harvest/transform
-   plan; flag that as added scope.
+   plan; flag that as added scope. Operator interest only puts a source into discovery:
+   bulk download/DB ingestion still requires the feasibility check below.
 6. **Scope** — pilot only (10-50 parcels) or full county run? Commercial-first
    prioritization?
 7. **Database** — load into the existing Neon query DB, or a different target?
@@ -45,7 +46,11 @@ then execute it end-to-end autonomously. Do NOT pause for per-stage approvals or
 "shall I proceed?" check-ins — the intake answers ARE the approval. Interrupt the run
 only when there is a genuine question: missing information the intake didn't cover, an
 ambiguous decision with real trade-offs, or a blocker you cannot resolve (credentials,
-network, repeated failures). Report progress as you go; batch questions when possible.
+network, repeated failures). A source whose full-download estimate is more than 48 hours
+is a genuine question: ask whether to download it anyway, ingest it into the query DB, or
+retrieve it at runtime. If runtime retrieval is chosen, ask which app/service owns the
+lookup and what direct API, server-side scrape, cache, queue, latency, freshness, and
+failure behavior it should use. Report progress as you go; batch questions when possible.
 
 ## Target outcome
 
@@ -61,8 +66,9 @@ Track progress in `oracle-node/docs/<county>-county-findings.md`.
 1. **Infra** — `bootstrap-oracle-infra`: verify stacks, buckets, secrets, Neon. Bootstrap
    anything missing before county work starts.
 2. **Discovery** — `county-discovery`: appraiser portal, permit vendor, parcel id formats,
-   usage-type vocabulary, bulk sources, anti-bot posture. Output: findings doc + sample
-   captures.
+   usage-type vocabulary, bulk sources, anti-bot posture, source performance, safe
+   concurrency, and bulk-ingest vs runtime-retrieval recommendations. Output: findings
+   doc + sample captures.
 3. **Seed** — `county-seed-data`: parcel roll → `s3://counties-seeds/<county>.csv`.
 4. **Appraisal** — `county-appraisal-onboarding`: browser flow, per-county prepare queue,
    transform scripts (reuse from Counties-trasform-scripts when present), eligibility
@@ -111,6 +117,10 @@ commit scraped data, secrets, or large captures; samples go in the PR only if sm
   `ON CONFLICT` merges. Resume = re-send the same message.
 - Be gentle with county portals: low permit concurrency (2-4), stepwise ramp-up with
   burn-in, back off on timeouts.
+- Before scraping/downloading any source at full scale, benchmark representative records,
+  estimate total elapsed time, and document safe concurrency. If a source is estimated to
+  take more than 48 hours, pause for an operator decision: download artifacts, ingest to
+  Neon/query DB, or retrieve at runtime from the owning app/service.
 - Geo-blocking: county/state portals often 403 or block non-US IPs outright. When any
   source returns blocked/403/blank pages locally, check the egress country first
   (`curl -s ipinfo.io/country`) and, if not US, ask the operator to run through a US

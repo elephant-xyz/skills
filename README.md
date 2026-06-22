@@ -57,8 +57,10 @@ npx skills add elephant-xyz/skills --all -y
    The skill begins with an intake (AWS profile/region, seed data, existing assets,
    sources, additional data sources like Sunbiz/BBB, scope, target DB). Answer once;
    after that it runs all stages autonomously — discovery, seed CSV, appraisal wiring,
-   transform validation, permit adapter, pilot run, full run, enrichment, query-DB
-   reconciliation — interrupting only for genuine blockers.
+   transform validation, permit adapter, source feasibility, pilot run, full run,
+   enrichment, query-DB reconciliation — interrupting only for genuine blockers. Sources
+   that would take more than two days to fully download trigger an explicit choice:
+   download anyway, ingest into the database, or retrieve from the owning app at runtime.
 
    You can also invoke any stage skill directly, e.g.:
 
@@ -76,7 +78,7 @@ npx skills add elephant-xyz/skills --all -y
 |---|---|
 | `onboard-county` | Orchestrator: sequences the full county onboarding, links all stage skills |
 | `bootstrap-oracle-infra` | Verify/bootstrap AWS stacks, buckets, secrets, Neon DB prerequisites |
-| `county-discovery` | Research a new county: appraiser portal, permit vendor, parcel format, anti-bot posture |
+| `county-discovery` | Research a new county: appraiser portal, permit vendor, parcel format, anti-bot posture, source feasibility |
 | `county-seed-data` | Produce and stage the parcel seed CSV in `counties-seeds` |
 | `county-appraisal-onboarding` | Browser flow, per-county prepare queue, transform scripts wiring |
 | `validate-county-transform` | Prove transform scripts extract 100% of available data across variability |
@@ -93,4 +95,6 @@ npx skills add elephant-xyz/skills --all -y
 - All skills assume work happens in a checkout of `oracle-node` (and sibling repos
   `elephant-query-db`, `Counties-trasform-scripts`, `lexicon` where noted).
 - AWS access: `AWS_PROFILE` + `AWS_REGION` environment variables; skills never hardcode accounts.
+- Full-source scraping is gated by measured performance and safe concurrency. If a source
+  is estimated above 48 hours, decide whether to download, ingest, or fetch it at runtime.
 - Default branch of this repo is the release channel for `npx skills update`.

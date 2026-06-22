@@ -1,6 +1,6 @@
 ---
 name: county-discovery
-description: Research a new US county before onboarding it to the oracle-node ingestion pipeline - appraiser portal, permit portal vendor, parcel id format, bulk data sources, and anti-bot posture. Use when asked to onboard, evaluate, or scope a new county, or when planning appraisal/permit scraping for a county not yet ingested.
+description: Research a new US county before onboarding it to the oracle-node ingestion pipeline - appraiser portal, permit portal vendor, parcel id format, bulk data sources, anti-bot posture, source performance, and bulk-ingest vs runtime-retrieval feasibility. Use when asked to onboard, evaluate, or scope a new county, or when planning appraisal/permit scraping for a county not yet ingested.
 metadata:
   author: elephant-xyz
 ---
@@ -37,7 +37,11 @@ Write findings to `oracle-node/docs/<county>-county-findings.md`. Required secti
    URL, bulk-download availability, and whether the operator wants it in scope. Lee
    shipped with two beyond appraisal+permits (Sunbiz, BBB); treat that as the baseline to
    offer, not the ceiling.
-7. **Risks** — geo-blocking, bot challenges, throttling expectations.
+7. **Source feasibility** — for every source that needs scraping/downloading, record the
+   total record/page/request estimate, probe timings, safe concurrency, failure rate,
+   estimated full-download time, and recommended mode: bulk artifact download, query-DB
+   ingestion, or runtime retrieval.
+8. **Risks** — geo-blocking, bot challenges, throttling expectations.
 
 When the profile is complete, commit it and push a copy to
 `github.com/elephant-xyz/Counties-trasform-scripts` under `<county>/docs/` on a branch,
@@ -63,16 +67,30 @@ their S3 or `downloads/` location.
    Always explore with Playwright, even when `curl` works — see "Exploring with
    Playwright" below. Record per source: curl-only / curl-partial / browser-required,
    and the full inventory of data the browser reveals.
-4. Identify the permit vendor by URL shape:
+4. Benchmark each source before recommending a full scrape:
+   - Measure a small representative probe (for example 10-25 records/pages) and record
+     p50/p95 latency, retries, failures, session/bootstrap cost, and bytes/artifacts.
+   - Test cautious concurrency levels (1, 2, 4; higher only if the source stays healthy)
+     and record the highest safe concurrency. Use portal errors, throttles, timeouts,
+     CAPTCHA/challenge frequency, and page completeness as health signals.
+   - Estimate total work from parcel count, result pages, permit/detail counts, or the
+     source's published record count. Compute estimated elapsed time using measured
+     latency, safe concurrency, required delays, and retry overhead.
+   - If the estimate is more than 48 hours for that source, stop treating full download as
+     the default. Ask the operator whether to download files anyway, ingest records into
+     the query DB, or retrieve the data at runtime. If runtime retrieval is chosen, ask
+     which app/service owns it and whether it should use direct API calls, server-side
+     scraping, cached lookup, queued background fetch, or another pattern.
+5. Identify the permit vendor by URL shape:
    - `*.accela.com/<AGENCY>/...` → Accela Citizen Access. Record the agency code, module
      name (usually `Permitting`), and record-number prefixes (used to classify record types).
    - Otherwise capture the search flow with browser devtools and note the JSON/HTML
      endpoints.
-5. Capture 3-5 sample permit detail pages and 3-5 appraisal pages covering different
+6. Capture 3-5 sample permit detail pages and 3-5 appraisal pages covering different
    property types (commercial, industrial, residential, condo, vacant) — save HTML to
    `downloads/<county>/samples/`. These become fixtures for transform validation and the
    permit adapter.
-6. Florida-specific: Sunbiz corporate data is statewide — only the county ZIP-prefix list
+7. Florida-specific: Sunbiz corporate data is statewide — only the county ZIP-prefix list
    is new. Collect the county's ZIP codes.
 
 ## Exploring with Playwright
@@ -107,7 +125,8 @@ For every page type (search results, detail page, each tab):
    browser-only must be captured by the browser flow or via the discovered endpoint with
    a modified request (copy headers, cookies, session bootstrap, POST params).
 4. Document per source: required session/bootstrap steps, endpoints + required
-   headers/params, and which artifacts need a real browser vs a modified plain request.
+   headers/params, which artifacts need a real browser vs a modified plain request, and
+   the performance/concurrency measurements that support or reject full ingestion.
 
 This inventory feeds `validate-county-transform` — fields missed here become silent
 coverage gaps later.
@@ -116,7 +135,10 @@ coverage gaps later.
 
 Lee County profile: Accela at `aca-prod.accela.com/LEECO/...` (no CAPTCHA, tolerates
 concurrency ~3-4), appraiser `leepa.org` via browser flow with STRAP search, seeds from
-the county roll at `s3://counties-seeds/lee.csv` (~516k parcels).
+the county roll at `s3://counties-seeds/lee.csv` (~516k parcels). Treat Lee permits as
+the example for source feasibility: measure permit-list and permit-detail throughput,
+then estimate the countywide harvest before deciding whether to prefetch everything or
+serve permit history through runtime lookup.
 
 Palm Beach (prototyped): appraiser `pbcpao.gov/Property/Details?parcelId=<PCN>`; permits
 NOT Accela — `pbc.gov/ePZB` guest endpoints (`iPZB.Building/guest/pcnpermits/<PCN>` and

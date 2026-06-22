@@ -1,6 +1,6 @@
 ---
 name: county-appraisal-onboarding
-description: Wire a new county's appraisal scraping into oracle-node - browser flow JSON, per-county prepare queue, per-county prepare flags, and transform scripts from Counties-trasform-scripts. Use when onboarding a county's property appraiser site, creating browser flows, or when prepare fails for a specific county.
+description: Wire a new county's appraisal scraping into oracle-node - browser flow JSON, per-county prepare queue, per-county prepare flags, transform scripts from Counties-trasform-scripts, and appraisal-source throughput gates. Use when onboarding a county's property appraiser site, creating browser flows, or when prepare fails for a specific county.
 metadata:
   author: elephant-xyz
 ---
@@ -41,6 +41,11 @@ npx elephant-cli prepare <parcel-or-url> \
 This creates `<stack>-prepare-queue-<county_key>` with its own event-source mapping so the
 county's portal tolerance can be tuned independently (start `MaximumConcurrency` low,
 raise while watching errors — Lee sustained 50+, but only after burn-in).
+
+Before scaling beyond smoke tests, use the `county-discovery` source-feasibility estimate
+or pilot timings from `county-ingest-run`. If the full appraisal download is estimated
+above 48 hours, ask the operator whether to continue the scrape, ingest only approved
+artifacts into the query DB, or move this source to runtime retrieval in an owning app.
 
 ## 3. Transform scripts (reuse first)
 
