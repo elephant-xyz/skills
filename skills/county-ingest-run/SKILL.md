@@ -237,7 +237,52 @@ number; a new row number would create an orphan folder).
 5. **Residual = dead folios.** Re-run the identify scan after the run; rows that
    still lack `output.zip` are genuinely retired/non-existent folios that will
    never scrape. Document them; do not chase forever. Achievable full-county count
-   = source − documented dead folios.
+   = source − documented dead folios. See "Classifying residual as DEAD vs RETRYABLE"
+   below before deciding whether to run another pass.
+
+### Classifying residual as DEAD vs RETRYABLE (2026-06-23)
+
+After a re-prepare pass, residual parcels still missing `output.zip` must be classified
+before deciding to re-scrape. The two categories behave completely differently.
+
+**KEY GOTCHA — LeePA does NOT return 404 for retired/renumbered folios.** It serves a
+page with no property-detail grid. The scraper hits a selector-wait timeout (errorType
+**10050**), which looks like a retryable failure but is actually a dead-folio signal.
+Proxies do NOT help: the page loads fine (no geo-block), it just has no data. Do not
+add proxies or retry dead folios — they will always fail with the same error.
+
+**Error code taxonomy** (from `MWAAEnvironment-workflow-errors` DynamoDB, NOT the empty
+`ErrorsTable`):
+
+| code  | description              | verdict              |
+|-------|--------------------------|----------------------|
+| 10050 | selector-wait / no-record | **DEAD** — page loads, no detail grid |
+| 10051 | nav-timeout              | retryable (transient) |
+| 10060 | ctx-destroyed            | retryable (transient) |
+| 10035/10036 | HTTP/browser error page | true 404 (never seen for Lee) |
+| 10091 | conn-refused             | usually recovers; transient geo/proxy |
+
+**How to classify with evidence:**
+
+1. **Read `MWAAEnvironment-workflow-errors` DynamoDB** (not `ErrorsTable` — it is empty,
+   cleared by TTL). Filter to prepare-stage errors (errorType starting with `10`). Use a
+   **recency split** — count errors since the last redrive pass, not all-time totals.
+   All-time totals are misleading: earlier passes recovered the retryable errors; only
+   the post-redrive survivors reveal the true dead-folio rate.
+
+2. **Run a live pilot** (~40 parcels from the residual list via `--only-rows-file` with
+   original row numbers preserved). If 0/40 recover with consistent 10050 errors,
+   the remainder are dead.
+
+**Lee result (2026-06-23):** of 5,073 residual after one redrive pass:
+- ~97.9% (≈5,022) were 10050 = **DEAD** (retired/renumbered folios)
+- ~2.0% (≈104) were 10051 = retryable
+- Pilot: **0/40 recovered** — confirmed dead, not geo-blocked
+
+**Conclusion pattern:** when a pilot recovers 0/40 and 97%+ of post-redrive errors are
+10050, stop chasing. Document the dead-folio count. Achievable full county = source −
+dead folios (Lee: 516,848 − ~5,000 ≈ **511,800**). Do NOT launch a full re-scrape of
+the residual tail.
 
 ## 5. Ramp-up
 
