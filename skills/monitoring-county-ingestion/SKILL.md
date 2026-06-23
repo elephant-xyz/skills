@@ -9,8 +9,12 @@ metadata:
 
 ## Quick start
 
-Create a county config env file once (copy `config/lee.env.example`, fill from
-CloudFormation stack outputs), then:
+> Run these scripts — do not re-implement their AWS calls inline. They encode the correct
+> queue/metric/stall-diagnosis logic and are macOS/Linux portable. Hand-rolling the checks
+> re-introduces bugs these scripts already handle (e.g. `date` portability).
+
+If a filled config already exists (e.g. `config/lee.env`), just use it. Otherwise create one
+once: copy `config/lee.env.example` and fill it from CloudFormation stack outputs. Then:
 
 ```bash
 AWS_PROFILE=<profile> AWS_REGION=<region> \
@@ -19,11 +23,18 @@ AWS_PROFILE=<profile> AWS_REGION=<region> \
 
 Paths are relative to this skill's directory.
 
+**Permit job prefix is auto-detected.** By default the script auto-detects the latest active
+`permit-harvest/<county>-property-first-seed/<jobId>` prefix, so permit counts always reflect
+the *current* run (not a stale hardcoded job). Use `--job-id <job-id>` to force a specific
+property-first seed run. It falls back to `PERMIT_JOB_PREFIX` only when no active prefix is
+found. (This prevents the stale-prefix bug where a finished job's counts get reported as if
+they were the live run's.)
+
 ## Workflow
 
 1. Run `scripts/ingestion-status.sh`. It reports, per county: appraisal queue depth +
    delete rate + event-source state/concurrency, permit queue + DLQ, S3 artifact counts
-   for the current job prefix, and (optionally) the Sunbiz transform summary.
+   for the resolved job prefix, and (optionally) the Sunbiz transform summary.
 2. Treat SQS counts as approximate (1-minute metric resolution; in-flight messages hidden
    during visibility timeout).
 3. ETAs:
@@ -31,7 +42,11 @@ Paths are relative to this skill's directory.
      report the track as paused — no live ETA.
    - Permits: queue-drain ETA is a lower bound (the seed feeder and eligibility branch
      keep adding work). The extracted-permit S3 `recentCount` is the real throughput signal.
-   - Whole run: feeder checkpoint (`feeder-state.json` row offset) ÷ seed CSV total rows.
+   - Whole run: `scripts/whole-run-progress.sh --config <county>.env` reads the feeder
+     checkpoint (`feeder-state.json` `nextSourceRowNumber`) ÷ seed CSV total rows. Caveat: if
+     `sourceExhausted` is true but processed rows are far below the seed total, the feeder was
+     superseded by a one-shot bulk enqueue (see `lastRun`) — use the queue-drain signal from
+     `ingestion-status.sh` instead.
 4. Neon counts complement S3 counts — connect with `DATABASE_URL` from
    `../elephant-query-db/.env.local` and count `properties` / permit rows inserted in the
    window.
@@ -45,6 +60,7 @@ Paths are relative to this skill's directory.
 ## Helper scripts
 
 - `scripts/ingestion-status.sh` — consolidated per-county report (requires `--config`)
+- `scripts/whole-run-progress.sh` — feeder-checkpoint progress vs seed total (`--config`, or `--feeder-state-uri` + `--total-rows`)
 - `scripts/s3-prefix-count.sh` — object count / recent count / bytes for any S3 prefix
 - `scripts/sunbiz-summary.sh` — Sunbiz lexicon-transform counters (env `SUNBIZ_SUMMARY_S3_URI`)
 - `scripts/permit-list-progress.mjs` — legacy Lee list-window progress

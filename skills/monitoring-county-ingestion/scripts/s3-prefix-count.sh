@@ -57,7 +57,11 @@ fi
 
 BUCKET="${BASH_REMATCH[1]}"
 PREFIX="${BASH_REMATCH[2]}"
-CUTOFF="$(date -u -d "${WINDOW_MINUTES} minutes ago" +%Y-%m-%dT%H:%M:%S)"
+if date -u -v-1M +%Y-%m-%dT%H:%M:%S >/dev/null 2>&1; then
+  CUTOFF="$(date -u -v-"${WINDOW_MINUTES}"M +%Y-%m-%dT%H:%M:%S)"
+else
+  CUTOFF="$(date -u -d "${WINDOW_MINUTES} minutes ago" +%Y-%m-%dT%H:%M:%S)"
+fi
 
 aws s3api list-objects-v2 \
   --bucket "$BUCKET" \
