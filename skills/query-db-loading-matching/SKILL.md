@@ -156,6 +156,47 @@ AWS_PROFILE=elephant-oracle-node AWS_REGION=us-east-1 npm run load:bulk -- \
   --stage-table elephant_bulk_stage_<timestamp>
 ```
 
+## Appraisal batch merge — index and planner hints (2026-06-23)
+
+**Problem:** Each 20k-parcel batch was taking 20–30 min. The FK-resolution JOIN in
+`buildBulkMergeSql` probes parent tables on `source_record_key` alone, but the existing
+unique indexes are composite `(source_system, source_record_key)`. `source_record_key`
+is the trailing column, so it cannot serve as an index-seek probe — the planner falls back
+to parallel Hash Joins with full table scans. With default `work_mem=4MB` and
+`random_page_cost=4`, the addresses hash (979k rows) spilled across 16 disk batches:
+18,178 ms just for that one join. Total join CTE: **20,874 ms per batch**.
+
+**Fix — three parts, all required:**
+
+1. **Single-column indexes** on every parent/reference table (`addresses`, `parcels`,
+   `properties`, `property_improvements`, `companies`, `people`, `deeds`). Use
+   `CREATE INDEX CONCURRENTLY` — safe on a live running load:
+   ```sql
+   CREATE INDEX CONCURRENTLY IF NOT EXISTS addresses_source_key_only_idx
+     ON public.addresses (source_record_key);
+   -- repeat pattern for parcels, properties, property_improvements, companies, people, deeds
+   ```
+   See `elephant-query-db/migrations/0004_bulk_merge_perf_indexes.sql` for all 7 indexes.
+
+2. **Session planner hints** in `mergeOneTable()` — set BOTH before each merge, not just one:
+   ```ts
+   await client.query("SET work_mem TO '128MB'");     // eliminates disk spill
+   await client.query("SET random_page_cost TO 1.1"); // Neon = NVMe SSD; default 4 forces Hash
+   ```
+   The indexes alone are not enough: with `random_page_cost=4` the planner still chooses
+   Hash joins. Both settings together make it pick Nested Loop + index seeks.
+
+3. **VACUUM ANALYZE** on parent tables after mass inserts — clears dirty visibility maps,
+   reducing heap fetches from ~46k to near zero for index-only scans.
+
+**Result:** join CTE 20,874 ms → **270 ms (~77× speedup)**.
+
+**Remaining floor:** `INSERT … ON CONFLICT` into `taxes` / `property_valuations` (5M rows,
+8–10 GB each, ~675k rows/batch) is IO-bound unique-index maintenance. This is a Neon CU
+throughput issue, not a query-plan issue — more CU helps; planner hints don't.
+
+Branch: `feat/appraisal-disk-bounded-batch-loader`, commit `7ccf61a` (elephant-query-db).
+
 ## Neon compute — merge bottleneck at scale
 
 The Neon endpoint used for loading (query-db default endpoint, `ep-mute-leaf`) was
