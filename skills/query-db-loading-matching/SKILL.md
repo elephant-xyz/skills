@@ -35,10 +35,39 @@ for the LOADING side.
 1. **Idempotent merges only** — CSV/batch staging + `ON CONFLICT DO UPDATE` (see
    `elephant-query-db/src/loader/bulk.ts`, `permits.ts`). Any load must be safely
    re-runnable.
-2. **Deterministic keys** — normalized parcel id for properties; permit number + source
-   for permits; document number for Sunbiz.
+2. **Deterministic keys** — **folio (`request_identifier`) for parcels/properties** (the
+   true 1:1 key; do NOT key on the digits-only normalized parcel id — it collapses
+   STRAPs with letters, see the parcel-id warning above); permit number + source for
+   permits; document number for Sunbiz.
 3. **Keep `source_payload`** — never drop unmapped fields; lexicon gaps are logged in
    `open-lexicon-gaps.md`, not discarded.
+
+## ⚠️ Parcel-id normalization collapses distinct parcels — key on the folio (2026-06-23)
+
+**BUG.** The loader's `parcels` conflict key used the **digits-only normalized**
+`parcel_identifier`. `normalizeParcelIdentifier` strips **all non-digit characters**, and
+the conflict key was `(jurisdiction_key, parcel_identifier)`. This **silently collapses
+distinct parcels whose STRAP contains letters**:
+
+- Lee condo units `…0001A` / `…0001B` / `…0001C` (different owners) all normalize to
+  `…0001` → one row.
+- Mid-string letters `…9A0` / `…9B0` / `…9C0` all normalize to `…90` → one row.
+
+Lee impact: **516,841 distinct STRAPs → only 485,599 digits-only keys → ~31,242 distinct
+parcels silently lost.** True count ≈ **512,353**, not the **481,111** that loaded. It
+also produced **20,926 orphaned `properties` (parcel_id NULL)**.
+
+**FIX (branch `fix/parcel-id-folio-key`, elephant-query-db).** Key `parcels` on the
+**folio (`request_identifier`)** — the true 1:1 unique key — plus a unique index. Child
+tables already resolve their parent FK by the folio-based `source_record_key`, so this
+aligns parents and children on the same key.
+
+**RULE — validate by folio, never by normalized parcel id.** Always validate the
+distinct-parcel count vs source **BY FOLIO (`request_identifier`)**. Do **not** compare on
+the normalized `parcel_identifier`, and do **not** raw-string-compare the parcel id — a
+raw string compare gives false mismatches. After applying the key fix, a **clean re-load
+is required**: a plain re-run keeps colliding on the old key (merges are idempotent, so
+they update the already-collapsed rows instead of un-collapsing them).
 
 ## Load paths
 
@@ -223,7 +252,17 @@ Order of confidence (from `data-load-and-matching-plan.md`):
 
 After any load, reconcile:
 
+**Always validate distinct parcels BY FOLIO** (`request_identifier`) vs the source seed
+count — never by the normalized `parcel_identifier` (collapses STRAPs with letters) and
+never by raw parcel-id string compare (false mismatches). E.g. for Lee: expect ~512,353
+distinct folios, not 481,111.
+
 ```sql
+-- distinct parcels by the TRUE key (folio), compare to source seed count
+SELECT count(DISTINCT request_identifier) FROM parcels WHERE jurisdiction_key = '<county>';
+-- orphan check (the normalization bug produced 20,926 of these for Lee)
+SELECT count(*) FROM properties WHERE parcel_id IS NULL;
+
 -- per county/run
 SELECT count(*) FROM properties WHERE county = '<county>';
 SELECT count(*) FROM permits p JOIN properties pr ON p.property_id = pr.id WHERE pr.county = '<county>';
@@ -234,3 +273,6 @@ SELECT count(*) FROM permits WHERE created_at > now() - interval '10 minutes';
 Compare against S3 artifact counts and the seed row count; investigate any gap before
 declaring a run complete. Check actual table/column names in
 `elephant-query-db/src/schema/` — the schema evolves with the lexicon.
+
+Once counts validate by folio, the next step is `county-open-data-publish` (export to
+IPFS + IPNS for MCP/NEO consumption).

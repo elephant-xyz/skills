@@ -86,6 +86,7 @@ npx skills add elephant-xyz/skills --all -y
 | `county-ingest-run` | Deploy, start the backpressure-aware seed feeder, run end-to-end |
 | `monitoring-county-ingestion` | Queue health, S3 artifact counts, Neon counts, ETAs for any county |
 | `query-db-loading-matching` | Load artifacts into Neon and cross-match by parcel id / address hash |
+| `county-open-data-publish` | Publish property data to IPFS (Filebase) as 1-file-per-property + sharded index, with a stable IPNS pointer the MCP reads |
 | `sunbiz-corporate-ingest` | Florida statewide Sunbiz corporate bulk ingest + lexicon transform |
 | `bbb-harvest` | BBB contractor category harvest for reputation/quality enrichment |
 | `transform-v2-builder` | Author/repair county transform handler packages for elephant-cli transform v2 |
