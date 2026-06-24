@@ -69,6 +69,50 @@ raw string compare gives false mismatches. After applying the key fix, a **clean
 is required**: a plain re-run keeps colliding on the old key (merges are idempotent, so
 they update the already-collapsed rows instead of un-collapsing them).
 
+## ⚠️ Clean re-load: FK-safe clear — NEVER `TRUNCATE … CASCADE` the shared tables (2026-06-24)
+
+A clean re-load needs the appraisal slate emptied first. **Do NOT `TRUNCATE … CASCADE`.**
+`addresses`, `companies`, `people` are **shared** across all tracks: Sunbiz/BBB FK into them,
+and the permit child tables (`permit_links`/`events`/`fees`/`contacts`/`custom_fields`,
+`inspections`) FK into `property_improvements`. A `TRUNCATE CASCADE` on the shared/parent
+tables wiped **Sunbiz (379,449) + BBB (2,619) + all permit children** — recovered only via a
+Neon point-in-time restore. (The naive "truncate the 20 appraisal tables" list is itself
+unsafe: it includes `property_improvements`, which permits depend on.)
+
+**RULE — clear by source, in reverse FK order, batched:**
+- `DELETE … WHERE source_system='lee_appraiser'` per appraisal table, in the **reverse** of
+  `APPRAISAL_TABLE_ORDER`, **skipping `addresses`/`companies`/`people` entirely** (leave the
+  shared rows; the idempotent merge re-handles them; orphaned shared rows are harmless —
+  every child FK into them is `ON DELETE SET NULL`).
+- Deleting `property_improvements WHERE source_system='lee_appraiser'` is safe — it does NOT
+  touch the `lee_accela` rows the permit children cascade off. Never delete it by parcel/property.
+- **Batch the deletes** (chunk via `ctid LIMIT 50000` in a loop): the appraisal child tables
+  are huge (`property_valuations` ~14.8M, `layouts` ~5.5M, `files` ~3.3M) — a single statement
+  locks tens of millions of rows. Batched = bounded + resumable.
+- Ready-made: `elephant-query-db/scripts/clear-appraisal-source.ts`.
+
+## Running the re-load durably — serial Fargate, not the laptop, not EC2 (2026-06-24)
+
+The full re-load is multi-hour. Don't run it on a laptop (sleep/network = lost run).
+
+- **EC2 is blocked** on the oracle-node account: on-demand **and** Spot vCPU are both capped at
+  **1**; every other family **0**. A quota case may be open but ungranted — don't wait on it.
+- **Fargate has a separate quota (6 vCPU, available)** and no 15-min limit (the clear + serial
+  merge move tens of millions of rows — too heavy for Lambda).
+- **The load MUST stay serial.** The appraisal loader interleaves stage+merge per batch and
+  writes the shared parents (`addresses`/`companies`/`people`/`parcels`). **Running it in
+  parallel deadlocks on those parents** — that is the cause of the earlier ~30,851-parcel loss.
+  So: ONE Fargate task, the existing loader unchanged, `--batch-size 20000`.
+- **Pattern shipped:** `elephant-query-db/infra/appraisal-reload/` — pure-CloudFormation SAM
+  app (ECS Fargate + Step Functions), `Dockerfile.reload`, entrypoint
+  (`scripts/reload-appraisal-entrypoint.sh`: migrate → clear → load → validate, with a `STEP`
+  env for read-only smoke tests). DB URL via Secrets Manager; use the **direct/unpooled**
+  `ep-mute-leaf` endpoint (COPY + the permanent stage table need session semantics).
+- **Gotchas:** the IAM user lacks the SAM serverless-transform macro → use **pure CloudFormation**
+  (no `Transform:`). `package-lock.json` is out of sync (missing esbuild) → the Dockerfile uses
+  `npm install`, not `npm ci`. Fargate `command` overrides become *args* to an `ENTRYPOINT`
+  (they don't replace it) → drive single steps via the `STEP` env, not a command override.
+
 ## Load paths
 
 - **Permits**: loaded inline by the permit-harvest worker per parcel (`loadToNeon`). For
