@@ -67,13 +67,33 @@ Produces, in the export dir: one `<cid>.json` per property, `shards/shard-NNNN.j
 `index.json` (the sharded index), and `manifest.json` (flat back-compat). DB connection
 comes from `DATABASE_URL` (the catalog plain `DATABASE_URL`, `ep-mute-leaf`).
 
+### ⚠️ Appraisal addresses are free-text only — parse them (2026-06-25)
+
+The appraisal source (`source_system='lee_appraiser'`) populates **only**
+`addresses.unnormalized_address` (a free-text single line like
+`"5845 CORPORATION CIRCLE, FORT MYERS, FL 33905"`). The structured columns
+`street_number / street_name / street_suffix_type / city_name / latitude` are **100% null**
+(verified: 0 of 511,968 Lee rows). An export that reads only the structured columns emits a
+**null address for the entire county** — silent, because every row is "successfully" exported.
+
+The export must parse `unnormalized_address` (format `"STREET, CITY, STATE ZIP"`) into the
+discrete `street` / `city` / `postalCode` fields NEO renders, with structured columns still
+winning when present (other sources). **Do NOT parse the state from the text:** the DB
+`state_code` is `FL`-or-null (never a wrong value) and NEO falls back to `parcel.stateCode`
+(FL for 100% of parcels); a parsed state token would inject wrong source values ("MI", "NC")
+into the ~7% of rows whose `state_code` is null. `latitude/longitude` come from the
+`geometries` table, not `addresses` (geometry is present for 100% of properties).
+
 ## Step 2 — Upload to Filebase
 
 ```bash
 npm run publish:ipfs-upload
 ```
 
-Resumable (writes a checkpoint; re-run to continue). Required env:
+Resumable (writes a checkpoint; re-run to continue). **⚠️ Before a CORRECTED re-publish,
+delete the stale checkpoint** (`.upload-runs/filebase-upload-checkpoint.json`): it skips by
+S3 key (`properties/<uuid>.json`), not by content, so a leftover checkpoint from a previous
+run will silently skip re-uploading every file and the fix never reaches IPFS. Required env:
 
 | Variable | Value / source |
 |---|---|
@@ -131,20 +151,40 @@ IPNS is the single source of truth.
 
 ## Bugs caught + fixed (do not re-hit)
 
+> ⚠️ **These fixes have drifted off `elephant-query-db` `main` once already.** Bugs B, C, D
+> below were documented here but the actual fixes lived on an un-merged branch, so a later
+> publish run from `main` re-hit all of them live. **Before publishing, confirm the
+> `upload-consolidation-to-filebase.ts` / export code on `main` actually contains these
+> fixes** (re-landed in elephant-query-db PR for the 2026-06-25 publish). Doc ≠ code.
+
 **A. `.env` quote-stripping.** The env loader did not strip surrounding quotes from
 values, so a quoted `DATABASE_URL` (or any host) parsed wrong — the DB host came through
 as literally `base`, failing with `getaddrinfo ENOTFOUND base`. Strip surrounding quotes
 when reading `.env`.
 
-**B. Double export-dir prefix.** Joining the export dir onto `manifest.filePath` when the
-filePath already contained the export-dir prefix produced a doubled path → `ENOENT` on
-upload. Join once; do not re-prepend the base dir.
+**B. Double export-dir prefix.** The manifest stores `filePath` WITH the export-dir prefix
+already, so `join(exportDir, entry.filePath)` doubles it → `ENOENT` fatal on the first file.
+Build the path from the relative key (`properties/<uuid>.json`), not `entry.filePath`.
 
 **C. Per-upload S3 deserialize middleware is NOT concurrency-safe.** Reading the
-`x-amz-meta-cid` response header via a per-request S3 client deserialize middleware caused
-`Duplicate middleware name` and cross-request contamination under concurrency. **Fix:**
-drop that middleware entirely and **trust the locally pre-computed CID** —
-`ipfs-only-hash` produces the same CID as Filebase, so the read-back was unnecessary.
+`x-amz-meta-cid` response header via a deserialize middleware added by a fixed name to the
+**shared** S3 client caused `Duplicate middleware name` and cross-request header
+contamination at `--concurrency > 1`. **Two valid fixes** — either drop the middleware and
+trust the locally pre-computed CID (`ipfs-only-hash` yields the same CID as Filebase), or
+attach the middleware to **each `PutObjectCommand`'s own stack** (`command.middlewareStack.add`,
+isolated per call) which keeps the Filebase read-back as a cross-check. Main uses the
+command-scoped form. Either way: **never add the capture middleware to the shared client.**
+
+**D. IPNS update `404`.** The uploader hit `https://api.filebase.io/v1/ipns` with an
+`_id`-keyed PUT — that path does not exist. The real API is `/v1/names`, **label-keyed**
+(see Step 3), name = `record.network_key`. Symptom: upload succeeds, `ipns_update_failed:
+… 404`, pointer never moves, consumers stay on the old CID.
+
+**E. Silent IPNS skip when the bearer is unset.** If `FILEBASE_API_TOKEN` is empty the run
+"succeeds" but logs `skipping IPNS update` and the pointer never moves. The uploader now
+**auto-derives** the bearer = `base64(S3_ACCESS_KEY_ID:S3_SECRET_ACCESS_KEY)` so only the S3
+keys + `FILEBASE_IPNS_LABEL` are needed. Always confirm the final log shows the IPNS name
+bumped to the new sequence — don't trust "upload complete" alone.
 
 ## AWS approach (run near Neon + Filebase)
 
@@ -177,6 +217,31 @@ checkpoint; the export restarts). The proper long-term fix is running in AWS onc
 quota is raised.
 
 ## Verification
+
+### Pre-publish reconciliation: source → DB → export (do this before uploading)
+
+Prove the export is complete and faithful for EVERY field, not just addresses, before you
+publish. Three cheap checks:
+
+1. **DB ↔ export, full counts (all properties).** For each `source_system` child table
+   (`taxes, sales_histories, structures, layouts, lots, utilities, ownerships, deeds, files,
+   property_valuations, geometries, flood_storm_information`) compare the DB count
+   (`WHERE source_system='<county>_appraiser'` — these tables carry their own `source_system`,
+   so no join needed) to the aggregate array length summed across all exported property JSONs.
+   **DB == export exactly** ⇒ the export is lossless AND there are zero orphaned child rows
+   (an orphan would make DB > export). Mismatch ⇒ stop, do not publish.
+2. **Source (S3) ↔ DB ↔ export, ~12 random folios.** Each property row carries
+   `source_artifact_uri` → the S3 `transformed_output.zip`. For a sample of folios, count the
+   data files per class in the zip (`tax_N.json`, `sales_N.json`, `deed_N.json`, `file_N.json`,
+   `layout_N.json`, `structure_N.json`, `lot.json`, `utility.json`, `geometry.json`,
+   `flood_storm_information.json`; owners are `person_N.json` **or** `company_N.json` — count
+   both) and assert S3 count == DB rows for that `property_id` == export array length. This is
+   the true source proof. (`relationship_*`/`fact_sheet`/`property_seed` files are links, not
+   data — exclude them.)
+3. **Parent identity:** distinct folios (`request_identifier`) in `parcels` == source count
+   (see `query-db-loading-matching` — validate BY FOLIO, never the normalized parcel id).
+
+### Post-publish
 
 - `GET /v1/names` shows the label pointing at the expected index CID.
 - Resolve `https://<ipns-name>.ipns.dweb.link/` → HEAD → `x-ipfs-roots` == index CID.
