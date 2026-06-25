@@ -47,6 +47,15 @@ Get usage-type spread from the seed CSV or county GIS export, not random samplin
 7. Verify `county_jurisdiction` in output matches the county for every sample (transform
    script mismatches have produced wrong-county labels before).
 
+> ⚠️ **In-pipeline SVL gap (2026-06-24).** The `elephant-express` state machine historically
+> ran SVL **only on the `minting` branch**. The Structured Archive default AND the
+> property-first path (Lee fullcounty) skipped SVL — parcels were uploaded to S3, loaded to
+> Neon, and enqueued for permits **with no schema validation** (a "successful" but wrong
+> transform passed silently). Fixed by routing all non-minting parcels through the existing
+> SVL gate, fail-closed (oracle-node PR #171). **RULE: every transform output must pass SVL
+> before it is loaded/enqueued — validate per parcel, not only at the end of the run.** If you
+> add a new post-transform branch, route it through SVL too.
+
 ## Acceptance
 
 Record in `oracle-node/docs/<county>-county-findings.md`:

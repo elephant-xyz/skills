@@ -90,6 +90,12 @@ unsafe: it includes `property_improvements`, which permits depend on.)
   are huge (`property_valuations` ~14.8M, `layouts` ~5.5M, `files` ~3.3M) — a single statement
   locks tens of millions of rows. Batched = bounded + resumable.
 - Ready-made: `elephant-query-db/scripts/clear-appraisal-source.ts`.
+- **Perf gotcha:** deleting `property_improvements` is the slow step — each row delete does an
+  FK-cascade check against the 6 permit child tables (`permit_links`/`events`/`fees`/`contacts`/
+  `custom_fields`, `inspections`), and without an index on their `property_improvement_id` FK
+  column that's a scan per delete (observed ~50k rows / ~6 min on prod). Add those FK-column
+  indexes (or VACUUM/analyze) before a large clear to avoid a multi-hour `property_improvements`
+  delete.
 
 ## Running the re-load durably — serial Fargate, not the laptop, not EC2 (2026-06-24)
 
