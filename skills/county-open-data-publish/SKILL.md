@@ -103,6 +103,11 @@ run will silently skip re-uploading every file and the fix never reaches IPFS. R
 | `S3_ENDPOINT` | `https://s3.filebase.io` |
 | `FILEBASE_IPNS_LABEL` | `oracle-open-data-lee` (per-county) |
 
+> **⚠️ Each county needs its OWN Filebase bucket.** The upload writes FIXED keys
+> (`index.json` / `manifest.json` / `shards/shard-*.json`), so reusing a bucket clobbers the
+> other county and can unpin its CIDs. Use a per-county `S3_BUCKET` + per-county
+> `FILEBASE_IPNS_LABEL`.
+
 Tune `--concurrency 64` for ~310 obj/s. The uploader **auto-derives the IPNS auth token
 from the S3 keys** (see Step 3) and **upserts the IPNS name** at the end — no separate
 token needed.
@@ -148,6 +153,12 @@ request and read the **`x-ipfs-roots`** response header:
 
 MCP env: set `ORACLE_OPEN_DATA_IPNS=<name>` and leave the fixed index-CID env unset, so
 IPNS is the single source of truth.
+
+**Multi-county MCP:** the MCP resolves the open-data IPNS per `county` via
+`ORACLE_OPEN_DATA_IPNS_MAP` (JSON `{"lee":"k51…","palm-beach":"k51…"}`) plus
+`ORACLE_OPEN_DATA_DEFAULT_COUNTY`. NEO must pass `county` to the MCP tools (the county
+switcher) and point `ORACLE_MCP_URL` at the STABLE MCP alias (`<project>-<team>.vercel.app`),
+NOT a pinned deployment URL — pinned URLs go stale on every deploy.
 
 ## Bugs caught + fixed (do not re-hit)
 

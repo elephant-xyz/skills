@@ -55,7 +55,10 @@ their S3 or `downloads/` location.
    - `oracle-node/docs/` for existing findings docs (Lee is the reference).
    - `transform/<county>/` in oracle-node and the county folder in
      `github.com/elephant-xyz/Counties-trasform-scripts` — if transform scripts exist,
-     the appraisal side has been at least partially solved before.
+     the appraisal side has been at least partially solved before. **Check ALL name
+     variants INCLUDING SPACES** (e.g. folder `palm beach`, not just `palm-beach` /
+     `palm_beach`) — the scripts-manager matches spaces/underscores/hyphens; don't rebuild
+     an already-shipped transform.
    - `browser-flows/` for an existing flow JSON for the county.
 2. Enumerate official data sources via the NETR Online directory:
    `https://publicrecords.netronline.com/state/<STATE>/county/<county>` — it lists the
@@ -131,6 +134,45 @@ For every page type (search results, detail page, each tab):
 This inventory feeds `validate-county-transform` — fields missed here become silent
 coverage gaps later.
 
+## Permit-source discovery (fragmented jurisdictions)
+
+A county has ONE appraiser but permits are NOT county-level: they live in dozens of
+municipal/township/borough portals (Palm Beach = 39 municipalities + unincorporated;
+nationally ~3,300 counties but ~25k-60k permit sources). You must **discover** each
+jurisdiction's permit portal, **classify its vendor**, and **maintain a source catalog**
+of the pointers — knowledge that survives people and scales to all of Florida, then the US.
+This is an **agent capability to build, not a county you hand-probe once.**
+
+**Output a source catalog** alongside the findings doc:
+`oracle-node/docs/<county>-sources.yaml` — one machine-readable registry of
+`{jurisdiction -> data/permit source URL, vendor, search support, status}`. See
+`palm-beach-sources.yaml` for the schema (countywide appraisal/sunbiz/bbb/gis blocks +
+a `permits:` list, one row per jurisdiction).
+
+Tooling lives in `oracle-node/scripts/permit-source-discovery/`:
+- `vendors.mjs` — `classifyVendor({url, html})` against a signature library
+  (Accela, Tyler EPL/Civic Access, Click2Gov/aspgov, OpenGov, CentralSquare/eHub,
+  ePZB county-custom, GovAccess). Extend the library as new vendors appear.
+- `discover.mjs` — given the jurisdiction list, resolves + classifies candidate portal
+  URLs and writes catalog rows (`status: discovered` or `needs-review`). It does NOT do
+  web search — **finding each city's official permit page is the LLM agent's job**; the
+  script resolves/classifies candidates and flags misses for you to research.
+- `certify.mjs <county-sources.yaml>` — probes every catalogued portal, asserts it is
+  live and its detected vendor matches the catalog. **This is the acceptance test for
+  "the agent can discover sources"** — run it and report the pass/mismatch/unreachable
+  summary; an uncertified catalog is not done.
+
+Procedure per county:
+1. Enumerate jurisdictions (county GIS `PZB/Municipalities` layer or Census places) into a
+   list; seed the catalog's `permits:` with one row per jurisdiction.
+2. Run `discover.mjs` to auto-resolve the easy ones; for each `needs-review`, web-search
+   `"<city> <state> building permit search"`, open the official portal, confirm it.
+3. `classifyVendor` each portal; record vendor + search-by-parcel/address support +
+   session/bootstrap needs (some need a Playwright session, e.g. PB unincorporated ePZB).
+4. Reuse/build a harvester per vendor via the `county-permit-adapter` skill (one adapter
+   serves every jurisdiction on that vendor — the leverage that makes 25k-60k tractable).
+5. Run `certify.mjs` and bank the catalog (commit + push with the findings doc).
+
 ## Reference example
 
 Lee County profile: Accela at `aca-prod.accela.com/LEECO/...` (no CAPTCHA, tolerates
@@ -140,6 +182,11 @@ the example for source feasibility: measure permit-list and permit-detail throug
 then estimate the countywide harvest before deciding whether to prefetch everything or
 serve permit history through runtime lookup.
 
-Palm Beach (prototyped): appraiser `pbcpao.gov/Property/Details?parcelId=<PCN>`; permits
-NOT Accela — `pbc.gov/ePZB` guest endpoints (`iPZB.Building/guest/pcnpermits/<PCN>` and
-`EPR_BLDG/PermitSearch/GetGuestPermitsRec`), curl blocked, Playwright required.
+Palm Beach (prototyped): appraiser is a **plain-HTTP API, no browser flow** —
+`POST pbcpao.gov/AutoComplete/SearchAutoComplete` (body `propertyType=RE&searchText=<q>`
+→ `[{text,pcn}]`) then `GET pbcpao.gov/Property/Details?parcelId=<17-digit PCN>`. **Probe
+for a plain-HTTP appraiser API first** — it is simpler/faster than a Browser Flow. Geometry
+came from the **seed CSV** (`parcel_polygon` / `longitude` / `latitude` / `building_polygon`
+columns; the transform reads it). Permits NOT Accela — `pbc.gov/ePZB` guest endpoints
+(`iPZB.Building/guest/pcnpermits/<PCN>` and `EPR_BLDG/PermitSearch/GetGuestPermitsRec`),
+curl blocked, Playwright required.

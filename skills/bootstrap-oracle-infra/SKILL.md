@@ -74,9 +74,20 @@ aws cloudformation deploy \
     PropertyFirstPermitMaximumConcurrency=10
 ```
 
-Worker code updates are shipped by zipping the lambda dir to
-`s3://<env-bucket>/deployments/permit-harvest-worker/…zip` and calling
-`aws lambda update-function-code`.
+#### Worker code deploy (code-only — NEVER `cloudformation deploy`)
+
+Ship permit-harvest worker code with `aws lambda update-function-code` (raw zip →
+`s3://<env-bucket>/deployments/permit-harvest-worker/<name>.zip`). **NEVER
+`cloudformation deploy` this stack to ship code** — the CFN `WorkerCodeS3Key` param is
+STALE (prod is shipped via update-function-code), so a CFN deploy rolls prod back to an old
+zip and breaks Lee. **The Lambda is SHARED with Lee prod.** Safe code-only deploy:
+download the RUNNING zip (`get-function` → `Code.Location`) as the baseline, swap ONLY the
+changed file(s), `diff -r` to prove only the intended files changed, upload, then
+`update-function-code`. Rollback = `update-function-code` with the prior zip.
+
+The permit-harvest worker role needs `sqs:GetQueueAttributes` on each county's prepare queue
+IF the feeder uses prepare-queue backpressure; otherwise omit the prepare queue from the
+feeder message's `backpressureQueues` (the workflow-queue cap still governs flow).
 
 `SourceSeedBucketName` matters: without it the seed feeder gets `AccessDenied` reading
 `counties-seeds`.
