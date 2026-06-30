@@ -71,6 +71,36 @@ The feeder checkpoints at `permit-harvest/<jobId>/feeder-state.json` (row offset
 self-requeues until `sourceExhausted`. Resume = send the same message again; the
 checkpoint prevents re-queuing.
 
+### Seed-feeder trigger (county-generic)
+
+The feeder handler is county-generic — it routes any `<county>-property-first-seed-feeder`
+message, sent by a per-county sender script (e.g. `scripts/send-<county>-seed-feeder.mjs`).
+An optional `sourceSystem` field drives the `skipExistingNeon` dedup (`<county>_appraiser`);
+feeder state is schema v2 (still reads legacy v1). ONE message drips the whole county with
+backpressure + checkpoint — resume = re-send the same message (idempotent). Pilot 10-50
+parcels via the per-county enqueue script BEFORE sending the feeder.
+
+- **Feeder ESM gotcha:** the `<stack>-permit-harvest-queue` event-source mapping (it triggers
+  the feeder handler) may be DISABLED — enable it to run. If ingestion stalls, check the ESM
+  FIRST. NEVER `sqs purge-queue` the shared permit-harvest-queue — it deletes other counties'
+  messages.
+
+### Appraisal-only runs (skip permits)
+
+To ingest appraisal without harvesting permits, set transform-worker env
+`PROPERTY_FIRST_PERMIT_ELIGIBLE_USAGE_TYPES=__NONE__` → every parcel's `shouldEnqueue=false`
+→ archive-only; bulk-load appraisal separately via `query-db-loading-matching`. `__NONE__`
+works because it is not `__ALL__` and matches no real usage type.
+
+- **The transform worker is SHARED across counties.** Lambda env updates REPLACE all vars —
+  merge, keep `TRANSFORM_S3_PREFIX`, and RESTORE the prior value (commonly `__ALL__`) after
+  the run / before any permit run.
+- **Throughput tuning:** the defaults (batchSize 100 / requeueDelay 900s) are the
+  permit-heavy Lee cadence — far too slow for appraisal-only plain-HTTP (~weeks for 650k).
+  Use a larger batchSize + shorter requeueDelay (moderate 200 / 120s ≈ 150k/day). The
+  workflow-queue backpressure cap (≤250) self-limits regardless; ramp gently, watching the
+  appraiser site's error rate.
+
 ## 4. Full-coverage permit redrive
 
 Use when a run was first gated to commercial/permit-priority appraiser usage types

@@ -128,6 +128,19 @@ The full re-load is multi-hour. Don't run it on a laptop (sleep/network = lost r
   oracle-node but not implemented — bulk loads are currently script-driven.)
 - **Sunbiz / BBB**: staged JSONL → loader scripts in `elephant-query-db`.
 
+## County parameterization (multi-county)
+
+- **Pass `--jurisdiction-key <county>_appraiser` to BOTH `run-data-load.ts` and
+  `run-bulk-data-load.ts`** (default is `lee_appraiser`). The `parcels` conflict key is
+  `(jurisdiction_key, request_identifier)`, so the wrong key cross-contaminates counties.
+- **Property-first 2-level outputs** (`row-N/<uuid>/`) load via `load:bulk` (recursive),
+  NOT `load:data`.
+- **Filebase upload checkpoint is per-bucket** — it was a single shared file → cross-county
+  contamination; scope the checkpoint by bucket.
+- **Geometry caveat:** confirm the transform's geometry output (`geometry_*.json`) actually
+  maps into the `geometries` table at load — a Palm Beach pilot load wrote `geometries: 0`.
+  If empty, fix the loader mapping, else NEO has no maps.
+
 ## Lee source prefixes & gotchas (verified 2026-06-22)
 
 The loader CLI defaults are stale for Lee full-county. Always pass explicit prefixes:
