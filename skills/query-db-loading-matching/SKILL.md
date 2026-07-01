@@ -133,14 +133,15 @@ The full re-load is multi-hour. Don't run it on a laptop (sleep/network = lost r
     for numeric-folio counties (e.g. Palm Beach) or validate false-fails on `letter_straps == 0`.
   - `template.yaml` params `JurisdictionKey`/`Tracks`/`SunbizPrefix`/`BbbPrefix`/`SkipClear`/
     `ExpectLetterStraps` wire straight into the container env. **All defaults preserve Lee byte-for-byte.**
-- **For a NEW county you MUST:** set `JURISDICTION_KEY=<county>_appraiser`, use `SKIP_CLEAR=1`
+- **Initial load of a NEW county:** set `JURISDICTION_KEY=<county>_appraiser`, use `SKIP_CLEAR=1`
   (a fresh county has nothing to clear and the loader upsert is idempotent — never clear with
-  Lee's key), and override `APPRAISAL_PREFIX` + `EXPECTED_PARCELS`. e.g. Palm Beach:
+  another county's key), and override `APPRAISAL_PREFIX` + `EXPECTED_PARCELS`. e.g. Palm Beach:
   `JURISDICTION_KEY=palm_beach_appraiser SKIP_CLEAR=1 EXPECT_LETTER_STRAPS=0`
   `APPRAISAL_PREFIX=outputs/palm-beach-property-first-seed/palm-beach-property-first-seed-all-20260630/`
   `EXPECTED_PARCELS=654530`; add sunbiz+bbb with `TRACKS=appraisal,sunbiz,bbb` + their prefixes.
-  This is a PR to **elephant-xyz/skills** (authoring repo) — sync the change into the oracle-node
-  `.agents/skills/` mirror too.
+- **RE-loading an EXISTING county** (e.g. after a folio-key fix): do NOT use `SKIP_CLEAR` — run the
+  clear with that county's `JURISDICTION_KEY` set (it clears only that `source_system`) so stale rows
+  are removed first; skipping it would merge on top of stale data.
 
 ## Load paths
 
