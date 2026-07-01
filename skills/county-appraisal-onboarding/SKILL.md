@@ -87,6 +87,10 @@ debugging.
 - A transform-script county-name mismatch can silently produce wrong-county labels in
   output (the "Columbia county" incident) — verify `county_jurisdiction` in transformed
   output equals the expected county.
+- Parcel-id format mismatch = silent empty county: an appraiser API given a wrong-width id
+  (e.g. a leading zero stripped by numeric storage) returns `[]` with no error, so the whole
+  county comes back empty. Validate the seed `parcel_id` width/format up front and fail loud
+  on a zero-result lookup — see `county-seed-data`.
 
 ## Transform worker tuning (heavy parcels)
 

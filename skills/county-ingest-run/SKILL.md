@@ -23,6 +23,11 @@ eligibility branch → permit harvest → Neon, individually. Input is ONLY the 
 with backpressure — never dump the whole county into SQS at once (516k messages exceeds
 retention and removes flow control).
 
+Scraping and transform run in **AWS Lambda (us-east-1, a US IP)** — NOT on the laptop, so
+a laptop's location or VPN is irrelevant to production ingestion. Only the sender kickoff
+and any laptop-side watchdog/monitoring depend on the laptop; for unattended overnight runs
+use an AWS-side watchdog or keep the laptop awake + plugged in.
+
 ## 1. Pilot (always first)
 
 1. Pick 10-50 parcels from the seed covering usage-type variability (include commercial so
@@ -84,6 +89,19 @@ parcels via the per-county enqueue script BEFORE sending the feeder.
   the feeder handler) may be DISABLED — enable it to run. If ingestion stalls, check the ESM
   FIRST. NEVER `sqs purge-queue` the shared permit-harvest-queue — it deletes other counties'
   messages.
+- **CRITICAL — always pass an explicit fixed `--job-id`:** the sender defaults `jobId` to the
+  current date (`...-all-<YYYYMMDD>`). A re-send after 00:00 UTC (manual OR by a watchdog)
+  builds a BRAND-NEW date → a fresh job from row 0 instead of resuming — silently splitting
+  the run into two S3 prefixes. Pass a fixed `--job-id` on EVERY send AND inside the
+  watchdog's `SENDER_CMD`. (We lost hours to a duplicate `...20260701` job re-scraping from
+  row 0 while the real `...20260630` sat frozen.)
+- **Feeder stalls ~30 min in — run a self-healing watchdog.** The feeder stops
+  self-requeuing partway through a run (its checkpoint freezes while its ESM stays Enabled).
+  Recovery is idempotent: re-send the same message (resumes from the checkpoint). Automate it
+  with a watchdog that polls the checkpoint and re-sends on stall — WITH a cooldown (≥15 min).
+  A naive no-cooldown re-sender piled ~150 duplicate feeder messages that ran concurrently and
+  DEADLOCKED the worker; one re-send normally revives it. Reference
+  `oracle-node/scripts/watchdog-seed-feeder.sh`.
 
 ### Appraisal-only runs (skip permits)
 
@@ -97,9 +115,13 @@ works because it is not `__ALL__` and matches no real usage type.
   the run / before any permit run.
 - **Throughput tuning:** the defaults (batchSize 100 / requeueDelay 900s) are the
   permit-heavy Lee cadence — far too slow for appraisal-only plain-HTTP (~weeks for 650k).
-  Use a larger batchSize + shorter requeueDelay (moderate 200 / 120s ≈ 150k/day). The
-  workflow-queue backpressure cap (≤250) self-limits regardless; ramp gently, watching the
-  appraiser site's error rate.
+  The worker re-streams the ENTIRE seed CSV from row 1 on EVERY wakeup to reach the
+  checkpoint (Palm Beach seed was 282 MiB), so a small `batchSize` re-pays that whole scan
+  for little work. Use a LARGE `batchSize` (e.g. 2000) so the scan is amortized over many
+  enqueues per wakeup; the workflow-queue backpressure cap still bounds in-flight work.
+  O(n²) caveat: the row-1 re-scan grows toward the end of a big county (streams ~all 282 MiB
+  near row 600k) — tolerable at 2000, but the real fix is a byte-offset seed index (worker
+  change). Ramp gently, watching the appraiser site's error rate.
 
 ## 4. Full-coverage permit redrive
 

@@ -59,6 +59,21 @@ aws s3 cp <county>.csv s3://counties-seeds/<county>.csv
 
 5. Record row count — it is the denominator for all ETA math during the run.
 
+## Parcel-id format — validate BEFORE any run
+
+The seed `parcel_id` must match the appraiser portal's EXPECTED width/format exactly.
+A wrong-width or wrong-format id typically makes the appraiser API return an empty `[]`
+with NO error — so a format bug makes the WHOLE county come back silently empty while
+looking like a clean, successful run.
+
+- **Leading-zero trap (Orange County):** the roll stored ids as NUMBERS, so a 15-digit
+  `012...` id lost its leading zero and became a 14-digit number → every lookup returned
+  `[]`. Fix: load ids as TEXT and pad to / resolve the canonical width before upload.
+- **Fail loud on an empty/zero-result lookup — never silently skip.** A silent empty is the
+  dangerous failure: it masquerades as success. Before any full run, assert a NON-empty
+  appraiser response for every sampled parcel; treat a zero-result lookup as a hard error,
+  not a skip.
+
 ## Prioritization
 
 The Lee run prioritized commercial properties. If the same is wanted, either sort the seed

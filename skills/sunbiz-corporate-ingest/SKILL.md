@@ -48,6 +48,13 @@ counties.) The worker scans the fixed-width records and matches principal, maili
 registered-agent, AND officer addresses; output is chunked JSONL plus `manifest.json`
 under `permit-harvest/<job-id>/sunbiz/corporate-by-zip/`.
 
+**Extract PER FILE — never point at a prefix.** The extract worker reads a SINGLE S3
+object (one GetObject to `/tmp`). Pointing `--source-data-s3-uri` at a directory prefix
+fails SILENTLY (NoSuchKey → DLQ, no output). The full quarterly ZIP (~1.74 GB) also unzips
+to ~18 GB, overflowing the 4 GB Lambda `/tmp`. So run the extractor ONCE PER expanded file
+(`cordata0.txt`..`cordata9.txt`, each a ~1.8 GB single text object) with `--source-format
+text` and a DISTINCT `--extract-key` per file.
+
 Scale reference (Lee): 12.6M records scanned, 379k matched, ~80 chunks; worker needs the
 4 GB `/tmp` configuration.
 
@@ -64,6 +71,14 @@ Emits `business_registration`, `business_registration_address` (role bridge),
 records, plus `summary.json` with counters. Complete when `invalidRecordCount == 0` and
 `transformedRecordCount == sourceRecordCount` (check via the monitoring skill's
 `sunbiz-summary.sh`).
+
+**Per-file extraction produces NO top-level manifest — build it.** The transform expects a
+manifest with an `entries` array of `{summaryUri}`, one entry per file's `summary.json`.
+Per-file extraction (above) leaves a separate `summary.json` per `cordataN` job but no
+combined manifest. Build that manifest yourself (one `{summaryUri}` per file's
+`summary.json`), then run the transform ONCE against it → a single `classes/` +
+`relationships/` tree at `<out>/business-registration-v1/`. Load with
+`--sunbiz-prefix <out>/business-registration-v1/classes/`.
 
 ## 4. Address matching (optional, later)
 
