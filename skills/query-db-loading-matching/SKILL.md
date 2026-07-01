@@ -118,6 +118,29 @@ The full re-load is multi-hour. Don't run it on a laptop (sleep/network = lost r
   (no `Transform:`). `package-lock.json` is out of sync (missing esbuild) → the Dockerfile uses
   `npm install`, not `npm ci`. Fargate `command` overrides become *args* to an `ENTRYPOINT`
   (they don't replace it) → drive single steps via the `STEP` env, not a command override.
+- **The Fargate wrapper was Lee-hardcoded even after the loader (#9) became county-generic
+  (fixed 2026-07-01).** Two landmines: (a) the entrypoint's `build_load_args` didn't pass
+  `--jurisdiction-key`, so the loader fell back to its `lee_appraiser` default and **wrote a new
+  county's parcels under Lee's namespace** (collision on `(jurisdiction_key, request_identifier)`);
+  (b) `clear-appraisal-source.ts` deleted a hardcoded `source_system='lee_appraiser'`, so a new-county
+  run's clear step **would wipe Lee**. Now county-generic + multi-track:
+  - `JURISDICTION_KEY` scopes the clear (`CLEAR_SOURCE_SYSTEM` overrides it), the loaded rows
+    (`--jurisdiction-key`), and the folio validation (`validate-appraisal-folio.ts` now counts
+    `parcels WHERE source_system = JURISDICTION_KEY`, not a global count). Default `lee_appraiser`.
+  - `TRACKS` (default `appraisal`) → `--tracks`; optional `SUNBIZ_PREFIX`/`BBB_PREFIX` →
+    `--sunbiz-prefix`/`--bbb-prefix`, so ONE task can load appraisal+sunbiz+bbb for a county.
+  - `EXPECT_LETTER_STRAPS` (default `true`, Lee) gates the letter-STRAP regression guard; set `0`
+    for numeric-folio counties (e.g. Palm Beach) or validate false-fails on `letter_straps == 0`.
+  - `template.yaml` params `JurisdictionKey`/`Tracks`/`SunbizPrefix`/`BbbPrefix`/`SkipClear`/
+    `ExpectLetterStraps` wire straight into the container env. **All defaults preserve Lee byte-for-byte.**
+- **For a NEW county you MUST:** set `JURISDICTION_KEY=<county>_appraiser`, use `SKIP_CLEAR=1`
+  (a fresh county has nothing to clear and the loader upsert is idempotent — never clear with
+  Lee's key), and override `APPRAISAL_PREFIX` + `EXPECTED_PARCELS`. e.g. Palm Beach:
+  `JURISDICTION_KEY=palm_beach_appraiser SKIP_CLEAR=1 EXPECT_LETTER_STRAPS=0`
+  `APPRAISAL_PREFIX=outputs/palm-beach-property-first-seed/palm-beach-property-first-seed-all-20260630/`
+  `EXPECTED_PARCELS=654530`; add sunbiz+bbb with `TRACKS=appraisal,sunbiz,bbb` + their prefixes.
+  This is a PR to **elephant-xyz/skills** (authoring repo) — sync the change into the oracle-node
+  `.agents/skills/` mirror too.
 
 ## Load paths
 
