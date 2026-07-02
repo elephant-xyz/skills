@@ -204,3 +204,34 @@ hotfix the deployed Lambda bundle directly:
 4. **Verify** — invoke a test parcel, confirm EMFILE errors are gone.
 5. **Follow up** with a proper `sam deploy` as soon as the build env is available — the
    hotfix is ephemeral and will be overwritten by the next deploy.
+
+### Dependency / pin bump on a SHARED function (e.g. DownloaderFunction @elephant-xyz/cli)
+
+When the change is a bumped dependency (a new `@elephant-xyz/cli` commit for the fetcher),
+not a source file, use the same surgical `update-function-code` — NEVER a full
+`deploy-infra.sh` (`sam`/CloudFormation) on the shared prepare stack (it touches every county
+and can roll back stale params — the permit-harvest-worker burn). Because npm **workspaces
+hoist deps**, a file swap is not enough — you must rebuild the dep in isolation and prove the
+delta. Proven recipe (Orange fetcher, 2026-07-02):
+
+1. **Baseline = the DEPLOYED zip, not the working tree** (the tree has drift):
+   `aws lambda get-function --function-name <Fn> --query Code.Location --output text` → `curl` it
+   → unzip to `baseline/`. **Back it up to S3** (`deployments/<fn>-backup/…`) — rollback =
+   `update-function-code` with it.
+2. **Build a fresh isolated bundle**: copy the function's source dir, `npm install --omit=dev
+   --install-links` (gets the new dep + a consistent closure). Confirm the fix is in the built
+   dist (grep the compiled file).
+3. **Swap ONLY the changed dep into the baseline** (keep baseline's other transitive deps):
+   `cp -r baseline candidate; rm -rf candidate/node_modules/<dep>; cp -r
+   fresh/node_modules/<dep> candidate/node_modules/<dep>`.
+4. **Prove the delta**: `diff -rq baseline candidate` MUST show only `<dep>` (+ package.json).
+   Anything else = drift → stop. (Tip: the dep's own source diff between the deployed pin and the
+   new commit should be scoped — e.g. the Orange bump `44fd046→8dd5f01` net-diffed only
+   `orange.ts`, so other counties were byte-identical.)
+5. **Deploy**: zip candidate, `aws s3 cp` to `deployments/<fn>-hotfix/…`, `update-function-code
+   --s3-bucket … --s3-key …` (>50 MB must go via S3), `aws lambda wait function-updated`.
+6. **Test ONE raw parcel** through the pipeline (`--limit 1`), confirm it reaches
+   `transformed_output.zip`, check the function's CloudWatch errors + DLQ.
+7. **Verify OTHER counties still work** — post-deploy their error types must be unchanged /
+   pre-existing (e.g. a pre-existing SF `Task Timed Out: Provided task does not exist anymore`
+   is an orphaned-token issue, NOT a deploy regression). Rollback with the backup zip if anything regresses.
