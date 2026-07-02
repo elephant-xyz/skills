@@ -96,7 +96,14 @@ Track progress in `oracle-node/docs/<county>-county-findings.md`.
     index CID == the export's index CID and resolves to the right `propertyCount` before
     declaring publish done. (The geo/value index is a SEPARATE publish — parameterize it by
     county first; see that skill.)
-12. **Serve via MCP → NEO** — `deploy-open-data-mcp`: add the county's IPNS name to the
+12. **Index & publish query table** — `county-query-table-publish`: export the flat
+    per-property query-table Parquet from Neon, pass the validation GATE (parquet rows ==
+    distinct folio in Neon, 0 dup/null folios), publish it to the county's OWN IPNS behind
+    Filebase, and wire it into the `elephant` MCP's `PROPERTY_QUERY_TABLE_MAP` so donphan can
+    query the county by key. Needs the consolidation `manifest.json` from stage 11 (for
+    `property_cid`). **Publishing PII to public IPFS is human-run** — the agent prepares,
+    validates, and `--dry-run`s; a human runs the upload.
+13. **Serve via MCP → NEO** — `deploy-open-data-mcp`: add the county's IPNS name to the
     MCP's `ORACLE_OPEN_DATA_IPNS_MAP`, redeploy the MCP, and confirm NEO renders the county
     through it. On Vercel, set the map env as PLAIN (not sensitive/empty) and REDEPLOY —
     env only binds to new deployments (see the publish skill's Vercel trap).
