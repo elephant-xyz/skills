@@ -32,6 +32,27 @@ npx elephant-cli prepare <parcel-or-url> \
    `ELEPHANT_PREPARE_USE_BROWSER_<County>`, continue-button selector, captcha flags —
    see `oracle-node/README.md` "Prepare function flags".
 
+## 1b. Plain-HTTP counties (native fetcher / multi-request flow) — NOT every county needs a browser flow
+
+If the appraiser exposes a plain-HTTP JSON API (probe for this FIRST — Palm Beach and Orange
+are examples), skip the browser flow. Set `ELEPHANT_PREPARE_USE_BROWSER_<County>=false`. There
+are two plain-HTTP mechanisms, and they interact:
+
+1. **Native county-specific fetcher** — hardcoded fetch logic in `@elephant-xyz/cli`
+   (`src/lib/county-specific-prepare/<county>.ts`, e.g. `orange.ts`), auto-triggered by
+   `county_jurisdiction`. Use this when the fetch needs logic a static flow can't express:
+   response chaining (resolve a canonical id, then fetch by it), id normalization
+   (e.g. zero-pad a stripped-leading-zero parcel id to the API's width), or retry-on-empty
+   (APIs that intermittently return `[]` for a valid id). Changes here are a `@elephant-xyz/cli`
+   PR + a downloader pin bump.
+2. **`multi-request-flows/<County>.json`** in the environment bucket — a static list of
+   independent templated requests (format: `oracle-node/multi-request-flows/Manatee-example.json`,
+   templated on `{{=it.request_identifier}}`). Good for simple "fetch N endpoints by id" APIs.
+
+⚠️ **A `multi-request-flows/<County>.json` OVERRIDES the native fetcher** (downloader precedence).
+If a county already has a native `<county>.ts` fetcher, do NOT add a flow file — it silently
+bypasses the native logic and produces a shape the transform cannot read. Pick one path.
+
 ## 2. Per-county prepare queue
 
 ```bash
@@ -62,6 +83,14 @@ hyphens).
    never left only in a local checkout or only synced to S3.
 3. The transform must emit `data/property.json` with `property_usage_type`; the
    post-transform permit-eligibility branch reads it.
+4. ⚠️ **The deployed S3 bundle `transforms/<county>.zip` can be STALE vs `Counties-trasform-scripts`
+   main — there is no auto-sync.** The transform worker runs the S3 bundle, not the repo. A stale
+   bundle silently uses old (possibly broken) extraction logic — Orange's deployed bundle was
+   months behind and crashed (`first is not defined`) while repo-main worked. ALWAYS sync the
+   bundle from main before running (`UPLOAD_TRANSFORMS=true` deploy / the GitHub sync fn, or as a
+   quick fix zip `<county>/scripts/*.js` and `aws s3 cp` to `transforms/<county>.zip`), and
+   confirm the deployed `data_extractor.js` matches main by hash (e.g. `sha256sum data_extractor.js`)
+   after any transform PR — a line count can match while content differs.
 
 ## 4. Usage-type eligibility
 
