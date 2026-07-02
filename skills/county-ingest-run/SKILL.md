@@ -299,6 +299,22 @@ number; a new row number would create an orphan folder).
    `--only-rows-file` is the scope fence — there is no per-row re-scrape of the
    already-done ~500k. Use `--include-existing-neon` to avoid hitting the live
    Neon DB during a concurrent LOAD; the only-rows list is already the exact scope.
+
+   > ⚠️ **Pass `--limit 0` with `--only-rows-file` — the default `--limit 1000` SILENTLY
+   > DROPS rows.** The enqueue applies the limit on top of the only-rows filter, so a
+   > residual list longer than 1000 quietly enqueues only the first 1000 and the rest are
+   > never re-driven — you "finish" with a residual that never shrinks. `--limit 0` =
+   > unlimited. Run the enqueue **in-region and resumably** (nohup/detached, checkpointed)
+   > so a laptop sleep or trans-Atlantic drop doesn't truncate a long residual pass.
+   > Then **re-scan the residual and loop** (identify → enqueue → wait → re-identify) until
+   > it stops shrinking; the floor is the documented dead tail.
+   >
+   > ⚠️ **A co-tenant county's firehose can orphan your re-enqueued parcels.** The
+   > prepare/transform Lambdas + SQS are SHARED. When another county is running full-tilt on
+   > the same pipeline, its dead-token churn (see `monitoring-county-ingestion`, PrepareError
+   > `01018`) can consume/expire the task tokens for your re-enqueued rows, so they "succeed"
+   > with no `output.zip`. If a residual pass under-delivers, check whether a co-tenant county
+   > was saturating the shared queue during the window before assuming the folios are dead.
 3. **Pilot first** — slice the first ~30 row numbers into a pilot file, `--dry-run`
    to confirm `enqueued`/`skippedNotInOnlyRows` counts and that the generated seed
    key equals the existing folder name, then live-enqueue and verify `output.zip`
@@ -358,6 +374,35 @@ add proxies or retry dead folios — they will always fail with the same error.
 10050, stop chasing. Document the dead-folio count. Achievable full county = source −
 dead folios (Lee: 516,848 − ~5,000 ≈ **511,800**). Do NOT launch a full re-scrape of
 the residual tail.
+
+### Plain-HTTP appraisers: 404 = DEAD, 500 = transient-OR-source-defect (Palm Beach, 2026-07-01)
+
+The 10050-selector-timeout signal above is a **puppeteer** signal. **Plain-HTTP appraisers**
+(native fetcher / multi-request flow, e.g. Palm Beach `pbcpao.gov`) never render a page, so
+classify by **HTTP status of the detail request**, not selector waits:
+
+| response | verdict |
+|----------|---------|
+| **404** | **DEAD** — genuinely retired / non-existent parcel. Never scrapes. Document + subtract. |
+| **500 / `NullReferenceException`** | **AMBIGUOUS** — either transient-under-load OR a persistent SOURCE-SIDE defect. |
+
+**Disambiguate a 500 with a no-load, multi-IP curl.** Curl the detail URL directly from
+**more than one IP** with **no concurrent scrape load**. If it returns 200 → the 500 was
+load-induced (back off concurrency, retry). If it **500s on a single unloaded request from
+multiple IPs**, it is the SOURCE's own bug for that parcel — un-scrapeable, treat as dead
+tail. Do NOT keep hammering it under load; that only reproduces the 500.
+
+### The completeness validator MUST target the ACHIEVABLE count, not an exact source assert
+
+**Achievable = source − documented-un-scrapeable-tail** (404s + confirmed source-side 500s +
+heavy-parcel timeouts). Write the completion check against the **achievable** count, NOT an
+exact `== source count` assert.
+
+> ⚠️ **An exact source assert causes an INFINITE retry-loop on any county with a dead/500
+> tail.** This literally happened on Palm Beach: the validator asserted the full source
+> count, the dead-folio tail could never reach it, so every pass re-enqueued the tail and
+> re-ran — **burning ~10 h per attempt** with zero net progress. Gate completion on
+> `loaded >= achievable`, and surface the documented un-scrapeable tail explicitly.
 
 ## 5. Ramp-up
 

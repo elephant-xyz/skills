@@ -56,6 +56,21 @@ Get usage-type spread from the seed CSV or county GIS export, not random samplin
 > before it is loaded/enqueued — validate per parcel, not only at the end of the run.** If you
 > add a new post-transform branch, route it through SVL too.
 
+## Validate the EXACT prefix that will load — reconcile folios BEFORE the Fargate load
+
+Coverage on a sample proves the extractor; it does NOT prove the batch you are about to
+load is complete. Before kicking off the load:
+
+- **Point the validation at the EXACT S3 prefix/batch the loader will read** — the same
+  `outputs/<jobId>/…` prefix and `transformed_output.zip` set, not a different/earlier
+  batch or a hand-picked sample. A run that validates prefix A but loads prefix B proves
+  nothing about what lands in Neon.
+- **Reconcile the distinct-folio (`request_identifier`) count of that prefix vs the source
+  seed count NOW**, before the load — not inside the multi-hour Fargate reload task. A
+  shortfall discovered mid-load means the whole task is wasted and must be redone; catch it
+  in a cheap S3 count first. (Fold in the documented un-scrapeable/dead tail: expect
+  `distinct folios == achievable`, per `county-ingest-run`.)
+
 ## Acceptance
 
 Record in `oracle-node/docs/<county>-county-findings.md`:
