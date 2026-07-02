@@ -26,7 +26,25 @@ retention and removes flow control).
 Scraping and transform run in **AWS Lambda (us-east-1, a US IP)** — NOT on the laptop, so
 a laptop's location or VPN is irrelevant to production ingestion. Only the sender kickoff
 and any laptop-side watchdog/monitoring depend on the laptop; for unattended overnight runs
-use an AWS-side watchdog or keep the laptop awake + plugged in.
+use the **AWS-side watchdog** (below) rather than the laptop `scripts/watchdog-seed-feeder.sh`.
+
+### AWS-side watchdog (laptop-independent — preferred for long runs)
+
+`oracle-node/workflow/lambdas/feeder-watchdog/` is a per-county Lambda + EventBridge rule
+(rate 5 min) that reads the feeder checkpoint and re-sends the (idempotent) feeder message
+when it goes stale — cloud-side, so it survives laptop sleep/lid-close. Deploy per county:
+
+```bash
+AWS_PROFILE=elephant-oracle-node AWS_REGION=us-east-1 \
+  bash workflow/lambdas/feeder-watchdog/deploy.sh --county <Name> --job-id <fixed jobId> --stale-seconds 1200
+```
+
+It bakes the feeder message from `send-<county>-seed-feeder.mjs --dry-run`, and creates a
+**dedicated per-county role** (do NOT reuse another county's — its S3 policy is scoped to
+that county's checkpoint, so a reused role fails with AccessDenied and then re-sends every
+tick — a churn loop). Raise `STALE_SECONDS` (e.g. 1200) when the county is backpressure-gated
+(shared workflow queue full from another live county) so normal pauses don't trigger spurious
+re-sends. Teardown after the run: `delete-function` + `delete-rule` + `delete-role`.
 
 ## 1. Pilot (always first)
 
