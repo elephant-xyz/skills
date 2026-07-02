@@ -87,6 +87,7 @@ npx skills add elephant-xyz/skills --all -y
 | `monitoring-county-ingestion` | Queue health, S3 artifact counts, Neon counts, ETAs for any county |
 | `query-db-loading-matching` | Load artifacts into Neon and cross-match by parcel id / address hash |
 | `county-open-data-publish` | Publish property data to IPFS (Filebase) as 1-file-per-property + sharded index, with a stable IPNS pointer the MCP reads |
+| `county-query-table-publish` | Export a per-county flat query-table Parquet from Neon → validate (rows == distinct folio) → publish to its own IPNS → wire the MCP's `PROPERTY_QUERY_TABLE_MAP` so donphan can answer arbitrary SQL |
 | `deploy-open-data-mcp` | Deploy your own stateless open-data MCP (Vercel / Cloudflare / AWS Lambda / Node) that serves the published data via IPNS — per-consumer deploy, no shared backend |
 | `sunbiz-corporate-ingest` | Florida statewide Sunbiz corporate bulk ingest + lexicon transform |
 | `bbb-harvest` | BBB contractor category harvest for reputation/quality enrichment |
