@@ -89,7 +89,8 @@ hyphens).
    months behind and crashed (`first is not defined`) while repo-main worked. ALWAYS sync the
    bundle from main before running (`UPLOAD_TRANSFORMS=true` deploy / the GitHub sync fn, or as a
    quick fix zip `<county>/scripts/*.js` and `aws s3 cp` to `transforms/<county>.zip`), and
-   confirm the deployed `data_extractor.js` matches main (e.g. line count) after any transform PR.
+   confirm the deployed `data_extractor.js` matches main by hash (e.g. `sha256sum data_extractor.js`)
+   after any transform PR — a line count can match while content differs.
 
 ## 4. Usage-type eligibility
 
