@@ -83,6 +83,17 @@ hyphens).
    never left only in a local checkout or only synced to S3.
 3. The transform must emit `data/property.json` with `property_usage_type`; the
    post-transform permit-eligibility branch reads it.
+
+   ⚠️ **Unmapped DOR use-code → warn + flag per record, NEVER throw-abort the parcel.**
+   County DOR/usage codes map to lexicon enum values; a code the mapping doesn't know
+   must **emit a per-record warning and flag the field** (preserve the raw code in
+   `source_payload`), and let the rest of the parcel transform through. A transform that
+   `throw`s `Unknown enum value` on an unmapped code **aborts the WHOLE parcel** — and
+   because one code often covers a whole class (e.g. a single condo use-code), a throw
+   silently dropped **entire condo complexes** from the county. Collect the warned/unmapped
+   codes from a validation run and add the missing mappings before scaling; the run must
+   never abort a parcel over one code. (This is the skip-and-warn rule the transform
+   handlers must follow — see `transform-v2-builder`.)
 4. ⚠️ **The deployed S3 bundle `transforms/<county>.zip` can be STALE vs `Counties-trasform-scripts`
    main — there is no auto-sync.** The transform worker runs the S3 bundle, not the repo. A stale
    bundle silently uses old (possibly broken) extraction logic — Orange's deployed bundle was

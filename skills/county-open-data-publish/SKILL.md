@@ -67,6 +67,12 @@ Produces, in the export dir: one `<cid>.json` per property, `shards/shard-NNNN.j
 `index.json` (the sharded index), and `manifest.json` (flat back-compat). DB connection
 comes from `DATABASE_URL` (the catalog plain `DATABASE_URL`, `ep-mute-leaf`).
 
+> **⚠️ Pass `DATABASE_URL` INLINE and UNQUOTED** until the env-parser quote-strip fix
+> (Bug A) is confirmed on `main`. Prefix the command with the raw value —
+> `DATABASE_URL=postgres://… npm run export:property-consolidation -- --shard-size 10000` —
+> not a quoted value in a `.env`. A quoted URL parses the host as literally `base`
+> (`getaddrinfo ENOTFOUND base`), and the export silently emits nothing.
+
 ### ⚠️ Appraisal addresses are free-text only — parse them (2026-06-25)
 
 The appraisal source (`source_system='lee_appraiser'`) populates **only**
@@ -107,6 +113,15 @@ run will silently skip re-uploading every file and the fix never reaches IPFS. R
 > (`index.json` / `manifest.json` / `shards/shard-*.json`), so reusing a bucket clobbers the
 > other county and can unpin its CIDs. Use a per-county `S3_BUCKET` + per-county
 > `FILEBASE_IPNS_LABEL`.
+>
+> **⚠️ Reusing a bucket that held a SAMPLE / pilot run republishes a STALE index.** The
+> fixed `index.json` key from the earlier small run is still in the bucket, and a leftover
+> upload checkpoint makes the uploader skip re-writing it — so IPNS gets re-pointed at the
+> OLD sample index (e.g. a few hundred properties) even though the full per-property files
+> uploaded fine. Before a full run into a bucket that ever held a sample: delete the stale
+> checkpoint (`.upload-runs/filebase-upload-checkpoint.json`) AND confirm the published
+> `index.json` CID equals the CID of the export's freshly-generated `index.json`, and that
+> it resolves to the FULL `propertyCount` — not the sample count (see Verification).
 
 Tune `--concurrency 64` for ~310 obj/s. The uploader **auto-derives the IPNS auth token
 from the S3 keys** (see Step 3) and **upserts the IPNS name** at the end — no separate
@@ -159,6 +174,31 @@ IPNS is the single source of truth.
 `ORACLE_OPEN_DATA_DEFAULT_COUNTY`. NEO must pass `county` to the MCP tools (the county
 switcher) and point `ORACLE_MCP_URL` at the STABLE MCP alias (`<project>-<team>.vercel.app`),
 NOT a pinned deployment URL — pinned URLs go stale on every deploy.
+
+> **⚠️ Vercel "sensitive + empty" env trap when adding a county to the map.** Two Vercel
+> footguns compound here: (1) an env var created as **Sensitive** cannot be read back and,
+> if it was ever saved empty/blank, silently serves an empty value — the MCP then resolves
+> NO county. Set `ORACLE_OPEN_DATA_IPNS_MAP` as a **PLAIN** (non-sensitive) var via the REST
+> API and **verify it with `?decrypt=true`** (GET
+> `/v9/projects/<id>/env?decrypt=true`) so you actually confirm the JSON that will be
+> injected. (2) Vercel binds env vars only to **NEW deployments** — updating the var does
+> nothing to the running deployment. After setting the map you MUST **REDEPLOY**, then
+> re-verify the county resolves through the live MCP.
+
+## The geo / value index is a SEPARATE publish (parameterize by county first)
+
+The property-consolidation publish above is NOT the only index. NEO's map/search also
+consumes a **geo + value index** (bounding-box / value-range lookup), produced by its own
+export + upload — a distinct step with its own output and its own IPNS/CID wiring. Two
+traps:
+
+- **It is easy to forget** — publishing only the property-consolidation index leaves NEO's
+  map layer empty even though property lookups work. Treat the geo/value index as a required
+  second publish for any county whose data NEO renders on a map.
+- **Its export was Lee-hardcoded** (county slug / source_system baked in). **Parameterize it
+  by county BEFORE running for a new county** — an un-parameterized run either fails or emits
+  Lee's geometry under the new county's name. Verify the geo index's `propertyCount` matches
+  the county's reconciled folio count, same as the consolidation index.
 
 ## Bugs caught + fixed (do not re-hit)
 
@@ -227,6 +267,14 @@ upload ~25–30 min. A laptop sleep kills the current step (the upload resumes f
 checkpoint; the export restarts). The proper long-term fix is running in AWS once the
 quota is raised.
 
+> **⚠️ For BIG counties, run export + upload IN-REGION — the laptop is not a safe fallback.**
+> A trans-Atlantic connection to Neon/Filebase saturates and the socket pool exhausts
+> local ephemeral ports, so export/upload dies mid-run with **`EADDRNOTAVAIL`** and a
+> truncated dataset — silent partial output that looks like success. Palm Beach hit this
+> from the laptop. If the vCPU quota blocks a `c7g.2xlarge`, run on any in-region box
+> (even a smaller in-region instance beats the laptop) rather than pushing a large export
+> across the Atlantic.
+
 ## Verification
 
 ### Pre-publish reconciliation: source → DB → export (do this before uploading)
@@ -254,8 +302,12 @@ publish. Three cheap checks:
 
 ### Post-publish
 
-- `GET /v1/names` shows the label pointing at the expected index CID.
-- Resolve `https://<ipns-name>.ipns.dweb.link/` → HEAD → `x-ipfs-roots` == index CID.
+- `GET /v1/names` shows the label pointing at the expected index CID — and that CID **equals
+  the CID of the export's freshly-generated `index.json`** (`ipfs-only-hash` it locally and
+  compare). If they differ, IPNS is pointing at a stale/older index (classic bucket-reuse or
+  leftover-checkpoint symptom) — do not declare done.
+- Resolve `https://<ipns-name>.ipns.dweb.link/` → HEAD → `x-ipfs-roots` == index CID, and the
+  resolved index's `propertyCount` == the county's reconciled folio count (NOT a sample count).
 - Through the MCP: `listOracleProperties {limit:2}` returns real data and `total` ==
   the published property count.
 - **Re-publish proof:** set a bogus fixed index-CID env on the MCP and confirm data still

@@ -65,6 +65,27 @@ they were the live run's.)
 - `scripts/sunbiz-summary.sh` — Sunbiz lexicon-transform counters (env `SUNBIZ_SUMMARY_S3_URI`)
 - `scripts/permit-list-progress.mjs` — legacy Lee list-window progress
 
+## Dead-token signature vs real parcel loss (don't conflate them)
+
+Two different things both show up as "a parcel didn't finish"; treat them separately.
+
+**Dead-token churn (usually NOT loss).** Signature: `PrepareError 01018` /
+`Provided task does not exist anymore` in the prepare worker / state machine. Cause: SQS
+**at-least-once** delivery hands the SAME message to the worker twice, and the downloader is
+**not idempotent on the task token** — the first delivery already completed and closed the
+Step Functions task, so the duplicate's `SendTaskSuccess` fires against a token that no
+longer exists. The execution itself typically **succeeded**; the cost is a **wasted
+re-scrape**, not a lost parcel. A watchdog that **double-sends the feeder on a missing/stale
+checkpoint** is a common source of the duplicate delivery — expect some `01018` whenever a
+watchdog is re-sending. High `01018` counts alone do **not** mean parcels are missing.
+
+**Real parcel loss is a SEPARATE path** — genuine prepare/transform failures, enqueue gaps,
+or rows that never got sent. **Quantify loss by RECONCILING COUNTS** (seed rows vs
+`output.zip` vs `transformed_output.zip` vs Neon folios per `source_system`), NOT by counting
+`01018` events. Inferring loss from dead-token counts over-reports; inferring "all good" from
+a low `01018` count under-reports. Only the count reconciliation (see `county-ingest-run`
+wrap-up and `query-db-loading-matching` by-folio validation) tells you the true missing set.
+
 ## Reporting guidance
 
 Keep updates concise: status (running/paused/complete/blocked), key backlog count,

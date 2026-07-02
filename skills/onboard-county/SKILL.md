@@ -56,8 +56,9 @@ failure behavior it should use. Report progress as you go; batch questions when 
 
 Every parcel in the county: appraisal data scraped and transformed to lexicon (Structured
 Archive in S3), commercial/industrial parcels enriched with per-parcel permit history, all
-loaded into the Neon query DB, joinable with Sunbiz (FL) and BBB enrichment — running
-24/7 on AWS without harming the county's websites.
+loaded into the Neon query DB, joinable with Sunbiz (FL) and BBB enrichment — then
+published to public IPFS behind a stable per-county IPNS name and served through the
+open-data MCP to NEO — running 24/7 on AWS without harming the county's websites.
 
 ## Stage checklist
 
@@ -89,6 +90,16 @@ Track progress in `oracle-node/docs/<county>-county-findings.md`.
     final counts; commit code/docs (never data) on a `<county>-property-first-ingest`
     branch; confirm every artifact-persistence PR (see ground rule below) is open and
     linked from the findings doc.
+11. **Publish open data** — `county-open-data-publish`: export the reconciled county from
+    Neon → upload 1-file-per-property + sharded index to the county's OWN Filebase bucket →
+    re-point its per-county IPNS name. PII upload is a human-run gate. Verify the published
+    index CID == the export's index CID and resolves to the right `propertyCount` before
+    declaring publish done. (The geo/value index is a SEPARATE publish — parameterize it by
+    county first; see that skill.)
+12. **Serve via MCP → NEO** — `deploy-open-data-mcp`: add the county's IPNS name to the
+    MCP's `ORACLE_OPEN_DATA_IPNS_MAP`, redeploy the MCP, and confirm NEO renders the county
+    through it. On Vercel, set the map env as PLAIN (not sensitive/empty) and REDEPLOY —
+    env only binds to new deployments (see the publish skill's Vercel trap).
 
 ## Persist artifacts — commit + PR, nothing lives only on disk
 
