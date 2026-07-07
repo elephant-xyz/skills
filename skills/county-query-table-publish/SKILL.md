@@ -139,6 +139,25 @@ before publishing.
   consolidation-export time. This is why Stage 1 needs `--manifest` and why this skill runs
   **after** `county-open-data-publish`.
 
+### ⚠️ `--manifest` is optional — and its Neon-contention fallback (Orange, 2026-07)
+
+`--manifest` is **optional** on `export:query-table`. Without it the export still succeeds but
+every `property_cid` is NULL — so run Stage 1 **after** Stage A produces the consolidation
+manifest, then re-export (or re-join, below) with `--manifest` to populate the CIDs.
+
+**Neon-contention fallback (do the CID join locally, no Neon).** If a concurrent
+`elephant-query-bulk-loader` is saturating Neon, the manifest re-export **hangs** — it loads
+the manifest fine, then starves on the Neon `SELECT`. Skip Neon entirely and join on disk:
+
+- Use **pyarrow** to read the already-exported `query-table.parquet`, build a
+  `propertyId → cid` map from the manifest's `entries[]`, join it onto the parquet's
+  `property_id` column, and write the parquet back with `property_cid` filled.
+- System python is PEP-668 **externally-managed** — create a **venv** for pyarrow (a bare
+  `pip install pyarrow` is refused).
+- Then validate with `validate:query-table … --parquet-only` (the `--parquet-only` path skips
+  the Neon reconcile, which is safe **only here** because the folio reconcile was already
+  proven pre-join, and Neon is the very thing that's contended).
+
 ## Stage 2 — Validate (THE GATE)
 
 Prove the folio-cardinality contract before anyone publishes PII. Fails loud (`exit 1`) on
@@ -235,6 +254,43 @@ The MCP opens an in-process DuckDB, creates a view `properties` over the county'
 donphan (the explore-via-MCP agent) passes the **county key** on every call, so the new
 county is queryable the moment the map entry is live. See `deploy-open-data-mcp` for the MCP
 deploy mechanics; point `ORACLE_MCP_URL` at the STABLE MCP alias, not a pinned deploy URL.
+
+### ⚠️ MCP wiring is the real go-live — TWO places, always MERGE (Orange, 2026-07)
+
+`PROPERTY_QUERY_TABLE_MAP` is the **PRIMARY** source for all data tools: a county listed there
+needs **no** `ORACLE_*` vars. Wiring it is the actual go-live, and it lives in **two** places —
+**MERGE** the new county into the existing JSON both times, never overwrite (overwriting is the
+"dropped Palm Beach" trap — you silently un-serve every other county):
+
+1. **elephant-mcp Vercel *production* env** → then **REDEPLOY**. Env binds only on new deploys,
+   so an updated var does nothing until you redeploy.
+2. **Local Cursor `~/.cursor/mcp.json`.** There can be **3 overlapping servers**
+   (`elephant` / `elephant-hosted` / `elephant-local`) — put the full map on the one donphan
+   actually uses and consolidate the rest so they don't drift.
+
+**Verify each county's IPNS is a real Parquet** before declaring done:
+`curl -r 0-3 https://ipfs.filebase.io/ipns/<key>` → the first bytes must be `PAR1`.
+
+### NEO catalog wiring (repo `elephant-xyz/catalog`)
+
+The MCP map makes donphan queryable; NEO's catalog UI is a separate wiring in the
+`elephant-xyz/catalog` repo. Base every change off the latest **`master`** — the shared
+county-aware infra evolves per PR. Per county, add:
+
+- `app/<county>/page.tsx` — **mirror the latest merged county page** (county-aware MCP,
+  `dynamic`, `maxDuration = 60`, DB fallback); don't hand-roll it.
+- a `COUNTY_OPTIONS` entry in `components/county-switcher.tsx`.
+- `tests/<county>-page.test.tsx` + a `neo-county-catalog-path` assertion.
+
+Gotchas:
+
+- **NEO brand is DOMAIN-based, not an env flag.** `neo.prismteam.ai/<county>` renders as NEO;
+  `catalog-*.vercel.app` and everything else render as SpeedBay. **Do NOT set `BRAND=neo` on
+  shared prod** — view NEO at `neo.prismteam.ai/<county>` (gated by `NEO_PASSWORD`).
+- **Vercel "Deployment was blocked / Git author must have access"** = the commit author's
+  GitHub account isn't linked to a Vercel member with project access. It is **not** fixable by
+  changing the commit email. `master` has no required checks, so it doesn't block the merge
+  (production deploys run under the repo integration regardless).
 
 ## Data-coverage caveat — validate + report honestly
 

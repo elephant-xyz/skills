@@ -275,6 +275,35 @@ quota is raised.
 > (even a smaller in-region instance beats the laptop) rather than pushing a large export
 > across the Atlantic.
 
+### ECS Fargate `open-data-publish` cluster — the standing in-region runner (Orange, 2026-07)
+
+Big-county consolidation export **dies on the laptop** (`EADDRNOTAVAIL`, the cross-Atlantic
+socket exhaustion above). The durable answer is the standing **`open-data-publish` ECS
+Fargate cluster** (CFN stack `open-data-publish-stack`), which runs export + upload in-region.
+Per county, provision its **OWN** (never share — same fixed-key clobber risk as the bucket note):
+
+- **Filebase bucket** `elephant-oracle-open-data-<county>`.
+- **Secrets Manager secret** `open-data-publish/filebase-<county>` with keys
+  `S3_ENDPOINT` / `S3_BUCKET` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `FILEBASE_API_TOKEN`.
+- **Task-def revision** whose container command is
+  `run-property-consolidation-export.ts --county <c> --shard-size 10000`, then
+  `FILEBASE_IPNS_LABEL=oracle-open-data-<county>` +
+  `upload-consolidation-to-filebase.ts --concurrency 64`.
+- Grant the county's secret ARN to the exec-role's `ReadTaskSecrets` inline policy —
+  **additively** (keep the DB secret + every other county's secret; do not replace the list).
+- Networking: subnet `subnet-0f1d2efb1cf3a92e5`, SG `sg-047ab4a3e4e76aaa9`, `assignPublicIp`.
+
+Separate buckets/IPNS/queries per county = zero data conflict; the only shared cost is extra
+Neon read load.
+
+> **⚠️ Fargate on-demand vCPU quota = 6** (`L-3032A538`). A default task is **4 vCPU**, so two
+> default tasks (`4 + 4`) exceed the quota → `VcpuLimitExceeded`. To publish a county
+> **alongside another county's already-running publish**, register the task-def at **2 vCPU**
+> (fits the free 2 under a running 4-vCPU task) — no quota bump needed.
+
+**Success signals (all must hold):** task exits `0`, log shows `upload_session_complete`
+with **0 failed**, IPNS bumped, and it prints the **INDEX CID + MANIFEST CID**.
+
 ## Verification
 
 ### Pre-publish reconciliation: source → DB → export (do this before uploading)

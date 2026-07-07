@@ -335,6 +335,27 @@ Order of confidence (from `data-load-and-matching-plan.md`):
    parcel evidence (`propertyFirstTarget`), not the parcel displayed on the permit page —
    permit portals sometimes display related/different parcels (caused a Lee repair job).
 
+## Orange County gotchas (2026-07)
+
+- **`files` + `ownerships` merge LAST in `APPRAISAL_TABLE_ORDER`.** Mid-load they read **0** —
+  that is **timing, not a gap**: each merges only at the tail of its batch, so they fill in as
+  batches finish. Don't "fix" a zero count for these two while a load is still running; recheck
+  after it completes.
+- **Dead tail = genuine non-resolver folios, reconcile as `seed − dead tail`.** Some seed
+  folios are OCPA "Quick search returned empty" (the source itself has no record) and never
+  resolve. They're deterministic — re-scraping recovers **~0**. So the target row count is
+  `seed − dead tail`, not `seed`. Orange: **490,529 − 972 = 489,557**. Prove the 972 are true
+  empties (spot-check the source), then reconcile to 489,557 rather than chasing the 972.
+- **⚠️ Address-doubling transform bug (Orange class) — delete the OLD pre-fix outputs.** If the
+  appraisal transform prepends `streetNumber` when `propertyAddress` **already** contains it,
+  the address doubles: `"5034 5034 LOYOLA LN"`. Fixing it is three steps, and the third is the
+  one people miss: (1) fix the transform, (2) transform-only-redrive, (3) **delete the OLD
+  pre-fix `transformed_output.zip` outputs**. Each parcel now has BOTH the old-doubled and the
+  new-clean output, and the bulk loader reads **ALL** outputs and upserts on
+  `(jurisdiction_key, request_identifier)` — **last-write-wins by arbitrary S3 order**, so
+  unless you delete the pre-fix zips the doubled address can win. Deleting them leaves only the
+  clean output.
+
 ## Verification queries
 
 After any load, reconcile:
