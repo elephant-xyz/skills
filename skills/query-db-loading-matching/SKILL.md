@@ -344,8 +344,13 @@ Order of confidence (from `data-load-and-matching-plan.md`):
 - **Dead tail = genuine non-resolver folios, reconcile as `seed − dead tail`.** Some seed
   folios are OCPA "Quick search returned empty" (the source itself has no record) and never
   resolve. They're deterministic — re-scraping recovers **~0**. So the target row count is
-  `seed − dead tail`, not `seed`. Orange: **490,529 − 972 = 489,557**. Prove the 972 are true
-  empties (spot-check the source), then reconcile to 489,557 rather than chasing the 972.
+  `seed − dead tail`, not `seed`. Orange: **490,529 − 972 = 489,557**. ⚠️ **Prove every excluded
+  folio is a genuine source-empty BEFORE trusting the reduced target** — a loader/transform
+  failure wrongly counted as "dead tail" silently drops real properties. For each excluded
+  folio confirm all three: it has only `seed_output.zip` (no `output.zip`), its Downloader log
+  says `Quick search for parcel … returned [empty]`, and a re-scrape recovers **~0**. Anything
+  that is NOT a clean source-empty is a **drop to investigate**, not dead tail. Only then
+  reconcile to 489,557.
 - **⚠️ Address-doubling transform bug (Orange class) — delete the OLD pre-fix outputs.** If the
   appraisal transform prepends `streetNumber` when `propertyAddress` **already** contains it,
   the address doubles: `"5034 5034 LOYOLA LN"`. Fixing it is three steps, and the third is the
@@ -353,8 +358,13 @@ Order of confidence (from `data-load-and-matching-plan.md`):
   pre-fix `transformed_output.zip` outputs**. Each parcel now has BOTH the old-doubled and the
   new-clean output, and the bulk loader reads **ALL** outputs and upserts on
   `(jurisdiction_key, request_identifier)` — **last-write-wins by arbitrary S3 order**, so
-  unless you delete the pre-fix zips the doubled address can win. Deleting them leaves only the
-  clean output.
+  unless you delete the pre-fix zips the doubled address can win. **Which to delete:** the old
+  and clean zips are distinguishable by S3 `LastModified` (old = original-scrape date, clean =
+  redrive date) — but the robust rule is **keep the NEWEST `transformed_output.zip` per parcel,
+  delete the rest**. **Dry-run first** and assert: (a) every delete key is a
+  `transformed_output.zip` under the county's outputs prefix, (b) **0 parcels end up with zero
+  outputs**, and (c) every KEPT output is dated the redrive day. Only then delete. (Orange:
+  738,203 old/dup deleted, 0 parcels emptied, all 489,557 kept were redrive-dated.)
 
 ## Verification queries
 

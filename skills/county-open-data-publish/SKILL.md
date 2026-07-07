@@ -285,6 +285,9 @@ Per county, provision its **OWN** (never share — same fixed-key clobber risk a
 - **Filebase bucket** `elephant-oracle-open-data-<county>`.
 - **Secrets Manager secret** `open-data-publish/filebase-<county>` with keys
   `S3_ENDPOINT` / `S3_BUCKET` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `FILEBASE_API_TOKEN`.
+  **`FILEBASE_API_TOKEN` must be a real, non-blank token** — a blank/stale one lets the upload
+  finish successfully while **silently skipping the IPNS pointer update**, so data lands in the
+  bucket but the county IPNS keeps resolving to the OLD CID (consumers read stale data).
 - **Task-def revision** whose container command is
   `run-property-consolidation-export.ts --county <c> --shard-size 10000`, then
   `FILEBASE_IPNS_LABEL=oracle-open-data-<county>` +
@@ -302,7 +305,10 @@ Neon read load.
 > (fits the free 2 under a running 4-vCPU task) — no quota bump needed.
 
 **Success signals (all must hold):** task exits `0`, log shows `upload_session_complete`
-with **0 failed**, IPNS bumped, and it prints the **INDEX CID + MANIFEST CID**.
+with **0 failed**, IPNS bumped, and it prints the **INDEX CID + MANIFEST CID**. Then **confirm
+the IPNS actually advanced** — resolve `https://ipfs.filebase.io/ipns/oracle-open-data-<county>`
+and check it returns the freshly-printed INDEX CID (a "successful" upload with a blank token can
+leave the pointer stale — see the token warning above).
 
 ## Verification
 

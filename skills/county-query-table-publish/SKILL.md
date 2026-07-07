@@ -154,6 +154,12 @@ the manifest fine, then starves on the Neon `SELECT`. Skip Neon entirely and joi
   `property_id` column, and write the parquet back with `property_cid` filled.
 - System python is PEP-668 **externally-managed** — create a **venv** for pyarrow (a bare
   `pip install pyarrow` is refused).
+- **Assert the CID fill BEFORE publishing.** The join must report non-null `property_cid` ==
+  row count (Orange: **filled 489,557 / missing 0**). `--parquet-only` does **not** check CIDs,
+  so a wrong manifest, field mismatch, or `property_id` mismatch can leave **every**
+  `property_cid` NULL while the row + folio checks still pass — publishing a query table that
+  can't link rows back to the consolidation CIDs. Also open one row's `property_cid` on IPFS
+  (`…/ipfs/<cid>`) and confirm it returns the matching property.
 - Then validate with `validate:query-table … --parquet-only` (the `--parquet-only` path skips
   the Neon reconcile, which is safe **only here** because the folio reconcile was already
   proven pre-join, and Neon is the very thing that's contended).
