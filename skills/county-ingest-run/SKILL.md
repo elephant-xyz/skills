@@ -197,11 +197,11 @@ PUBLISH_ARN=$(aws cloudformation describe-stacks --stack-name incremental-county
 
 # ONE publish execution per county (singleton) — see the ExecutionAlreadyExists note below
 # before reusing a name after a stop/restart:
-aws stepfunctions start-execution --state-machine-arn "$PUBLISH_ARN" --name <county>-publish-<date> \
+aws stepfunctions start-execution --state-machine-arn "$PUBLISH_ARN" --name <county>-publish-<run-id> \
   --input '{ "county": "<county>", "statusBucket": "<env bucket>", "waitSeconds": 3600 }'
 
 # ONE load execution per track — appraisal (completes when the feeder drains):
-aws stepfunctions start-execution --state-machine-arn "$LOAD_ARN" --name <county>-appraisal-<date> \
+aws stepfunctions start-execution --state-machine-arn "$LOAD_ARN" --name <county>-appraisal-<run-id> \
   --input '{
     "county": "<county>", "jurisdictionKey": "<county>_appraiser", "track": "appraisal",
     "sourcePrefix": "outputs/<jobId>/",
@@ -216,10 +216,12 @@ aws stepfunctions start-execution --state-machine-arn "$LOAD_ARN" --name <county
   `county-query-table-publish`; it keys the SSM param, the IPNS label, and the MCP map.
 - **One `statusKey` per track** (`incremental-status/<county>/<track>.json`) — a shared key
   lets tracks clobber each other's `{processed,skipped}` status.
-- **Unique `--name` per (re)start** (`<county>-appraisal-<date>`, `<county>-publish-<date>`).
-  Step Functions keeps execution names unique for ~90 days, so re-running with the SAME name
-  after a stop/finish fails with `ExecutionAlreadyExists`. Because PUBLISH is a per-county
-  **singleton**, before starting one first confirm none is already live:
+- **Unique `--name` per (re)start** — use a per-attempt `<run-id>`, e.g.
+  `<county>-appraisal-$(date +%Y%m%d-%H%M%S)`. Step Functions keeps execution names unique for
+  ~90 days, so re-running with any name already used in that window (including a plain
+  day-stamp on a same-day retry) fails with `ExecutionAlreadyExists` — a date is NOT unique
+  enough; use a timestamp/uuid. Because PUBLISH is a per-county **singleton**, before starting
+  one also confirm none is already live:
   `aws stepfunctions list-executions --state-machine-arn "$PUBLISH_ARN" --status-filter RUNNING`.
 - **Delta tracks with no feeder** (permits): point `feederStateKey` at a MISSING key and set
   `seedTotal: 1` so completion never fires and it loops forever on daily deltas. This is safe
