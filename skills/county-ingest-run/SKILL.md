@@ -1,6 +1,6 @@
 ---
 name: county-ingest-run
-description: Deploy and run the end-to-end property-first ingestion for an onboarded county - pilot batch first, source-feasibility gate, then the full backpressure-aware seed-feeder run with concurrency ramp-up. Use when starting, scaling, resuming, or wrapping up a county ingestion run on AWS.
+description: Deploy and run the end-to-end property-first ingestion for an onboarded county - pilot batch first, source-feasibility gate, then the full backpressure-aware seed-feeder run with concurrency ramp-up, plus the streamed incremental-county load+publish that lands the county in Neon and re-publishes the query-table to IPFS AS the run ingests. Use when starting, scaling, resuming, streaming to Neon/IPFS, or wrapping up a county ingestion run on AWS.
 metadata:
   author: elephant-xyz
 ---
@@ -144,7 +144,92 @@ works because it is not `__ALL__` and matches no real usage type.
   enqueues per wakeup; the workflow-queue backpressure cap still bounds in-flight work.
   O(n²) caveat: the row-1 re-scan grows toward the end of a big county (streams ~all 282 MiB
   near row 600k) — tolerable at 2000, but the real fix is a byte-offset seed index (worker
-  change). Ramp gently, watching the appraiser site's error rate.
+  change).   Ramp gently, watching the appraiser site's error rate.
+
+## 3d. Streamed load + publish — make the run queryable AS it ingests
+
+Run this **alongside** the full run (§3) so the county lands in Neon and re-publishes to
+public IPFS **incrementally, as parcels arrive** — not in one batch at the end. The full
+run above stages appraisal artifacts to `outputs/<jobId>/` and loads **permits inline** per
+parcel; this stage adds the **appraisal-from-S3 load** and the **query-table publish** on a
+watermarked loop, so donphan sees a steadily-growing count during the run. It does NOT wait
+for 100% of the county.
+
+Reference infra: `elephant-query-db/infra/incremental-county/` — **read its `README.md` for
+the authoritative execution contract, deploy params, and pre-prod flags.** Two self-looping
+Step Functions (deployed once as `incremental-county-stack`):
+
+- **LOAD** (`incremental-county-load`) — source-agnostic; **one execution per track**
+  (`appraisal` | `permits` | `sunbiz` | `bbb`). Each cycle watermarks the track's S3 prefix,
+  bulk-loads only NEW artifacts into Neon, flips the per-county `publish-pending` flag when it
+  changed rows, then waits and loops. Appraisal **completes** when the feeder drains
+  (`nextSourceRowNumber >= seedTotal`); permits/deltas loop forever.
+- **PUBLISH** (`incremental-county-publish`) — **per-county singleton**; one execution per
+  county. Polls `publish-pending`; when set it clears the flag, re-exports+validates the
+  county query-table Parquet, re-points `oracle-query-table-<county>` IPNS, and writes the
+  coverage snapshot. It **coalesces** every track's signal, so appraisal + permit loads never
+  race on the single shared county Parquet.
+
+**Division of labor (do NOT double-load):** the run loads **permits inline**; the LOAD
+machine owns **appraisal** (and any bulk track). Don't also bulk-load appraisal by hand
+mid-run via `query-db-loading-matching` — the watermark already merges each new batch
+(merges are idempotent, but a manual bulk load duplicates the work and fights the advisory
+lock).
+
+**PII gate preserved (streamed ≠ auto-published).** PUBLISH exercises the full path every
+cycle but stays a **dry-run — no IPNS re-point** — until a human sets the per-county SSM
+approval param. Flip it live only when you intend to publish per-property PII to public IPFS:
+
+```bash
+aws ssm put-parameter --name /oracle/<county>/publish-approved --value true --type String --overwrite
+```
+
+The slug MUST be the **hyphen** form and match `county` in the PUBLISH input; a missing param
+= dry-run (the machine catches the lookup miss and proceeds with `PUBLISH_APPROVED=""`).
+
+### Start (after `deploy.sh` has run once for the stack — see infra README for secrets/subnets)
+
+```bash
+LOAD_ARN=$(aws cloudformation describe-stacks --stack-name incremental-county-stack \
+  --query "Stacks[0].Outputs[?OutputKey=='StateMachineArn'].OutputValue" --output text)
+PUBLISH_ARN=$(aws cloudformation describe-stacks --stack-name incremental-county-stack \
+  --query "Stacks[0].Outputs[?OutputKey=='PublishStateMachineArn'].OutputValue" --output text)
+
+# ONE publish execution per county (singleton):
+aws stepfunctions start-execution --state-machine-arn "$PUBLISH_ARN" --name <county>-publish \
+  --input '{ "county": "<county>", "statusBucket": "<env bucket>", "waitSeconds": 3600 }'
+
+# ONE load execution per track — appraisal (completes when the feeder drains):
+aws stepfunctions start-execution --state-machine-arn "$LOAD_ARN" --name <county>-appraisal \
+  --input '{
+    "county": "<county>", "jurisdictionKey": "<county>_appraiser", "track": "appraisal",
+    "sourcePrefix": "outputs/<jobId>/",
+    "seedTotal": <source row count>,
+    "statusBucket": "<env bucket>", "statusKey": "incremental-status/<county>/appraisal.json",
+    "feederStateBucket": "<env bucket>",
+    "feederStateKey": "permit-harvest/<jobId>/feeder-state.json",
+    "waitSeconds": 900 }'
+```
+
+- **Hyphen slug end-to-end** (`palm-beach`, not `palm_beach`) — same rule as
+  `county-query-table-publish`; it keys the SSM param, the IPNS label, and the MCP map.
+- **One `statusKey` per track** (`incremental-status/<county>/<track>.json`) — a shared key
+  lets tracks clobber each other's `{processed,skipped}` status.
+- **Delta tracks with no feeder** (permits): point `feederStateKey` at a MISSING key and set
+  `seedTotal: 1` so completion never fires and it loops forever on daily deltas.
+- **Watch:** CloudWatch log group `/ecs/incremental-county` (both `load` and `publish` streams).
+
+### Stop / wrap-up
+
+- The **appraisal LOAD succeeds on its own** when the feeder drains. The PUBLISH singleton and
+  any forever-looping delta track (permits) keep running — **stop them at wrap-up**:
+  ```bash
+  aws stepfunctions stop-execution --execution-arn <execution-arn>
+  ```
+- Then verify: distinct folios in Neon reconcile vs source (`query-db-loading-matching`,
+  BY `request_identifier`) and donphan answers a smoke query for the county
+  (`county-query-table-publish`, "Done ="). If publishing was approved, confirm the IPNS
+  pointer moved; otherwise the run stayed dry-run by design.
 
 ## 4. Full-coverage permit redrive
 
@@ -430,4 +515,7 @@ exact `== source count` assert.
 - Feeder reports `sourceExhausted`; queues drain to 0; reconcile counts: seed rows vs
   archived artifacts vs Neon properties vs permit-eligible vs permits loaded. Record final
   numbers in `oracle-node/docs/<county>-county-findings.md`.
+- If you ran the streamed load+publish (§3d), **stop the PUBLISH singleton and any
+  forever-looping delta LOAD execution** (`aws stepfunctions stop-execution`); the appraisal
+  LOAD already self-completes when the feeder drains.
 - Commit code/docs (never data) to a `<county>-property-first-ingest` branch.

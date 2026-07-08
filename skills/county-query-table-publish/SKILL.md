@@ -285,3 +285,7 @@ laptop only kicks it off and monitors. If you must run locally, keep it awake
 - `deploy-open-data-mcp` — how to deploy the `elephant` MCP that reads
   `PROPERTY_QUERY_TABLE_MAP` and serves `queryProperties` / `getPropertyQuerySchema`.
 - `monitoring-county-ingestion` — counts/ETAs for the upstream load.
+- `county-ingest-run` §3d "Streamed load + publish" — automates this export→validate→publish
+  on a per-county loop (`incremental-county-publish`) that runs alongside the ingestion run
+  and re-points `oracle-query-table-<county>` IPNS as coverage grows. It honors the same
+  human PII gate: the loop stays a dry-run until `/oracle/<county>/publish-approved` is set.

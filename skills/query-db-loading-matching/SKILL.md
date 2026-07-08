@@ -363,3 +363,15 @@ declaring a run complete. Check actual table/column names in
 
 Once counts validate by folio, the next step is `county-open-data-publish` (export to
 IPFS + IPNS for MCP/NEO consumption).
+
+## Streamed alternative — the incremental-county LOAD machine
+
+The bulk/script loads here are for backfills and reconciliation. To load a county **as its
+ingestion run produces artifacts** (instead of one batch at the end), use the
+`incremental-county-load` Step Function — a source-agnostic, watermarked loop that merges
+only NEW artifacts each cycle and signals the paired publish machine. It is driven from
+`county-ingest-run` §3d "Streamed load + publish"; infra + execution contract live in
+`elephant-query-db/infra/incremental-county/`. Same loader, same idempotent merges, same
+folio key — just watermarked and continuous. Don't run a manual bulk appraisal load for a
+county while its incremental LOAD execution is active (they fight the loader's advisory lock
+and duplicate work).
