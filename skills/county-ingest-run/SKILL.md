@@ -144,7 +144,7 @@ works because it is not `__ALL__` and matches no real usage type.
   enqueues per wakeup; the workflow-queue backpressure cap still bounds in-flight work.
   O(n²) caveat: the row-1 re-scan grows toward the end of a big county (streams ~all 282 MiB
   near row 600k) — tolerable at 2000, but the real fix is a byte-offset seed index (worker
-  change).   Ramp gently, watching the appraiser site's error rate.
+  change). Ramp gently, watching the appraiser site's error rate.
 
 ## 3d. Streamed load + publish — make the run queryable AS it ingests
 
@@ -195,12 +195,13 @@ LOAD_ARN=$(aws cloudformation describe-stacks --stack-name incremental-county-st
 PUBLISH_ARN=$(aws cloudformation describe-stacks --stack-name incremental-county-stack \
   --query "Stacks[0].Outputs[?OutputKey=='PublishStateMachineArn'].OutputValue" --output text)
 
-# ONE publish execution per county (singleton):
-aws stepfunctions start-execution --state-machine-arn "$PUBLISH_ARN" --name <county>-publish \
+# ONE publish execution per county (singleton) — see the ExecutionAlreadyExists note below
+# before reusing a name after a stop/restart:
+aws stepfunctions start-execution --state-machine-arn "$PUBLISH_ARN" --name <county>-publish-<date> \
   --input '{ "county": "<county>", "statusBucket": "<env bucket>", "waitSeconds": 3600 }'
 
 # ONE load execution per track — appraisal (completes when the feeder drains):
-aws stepfunctions start-execution --state-machine-arn "$LOAD_ARN" --name <county>-appraisal \
+aws stepfunctions start-execution --state-machine-arn "$LOAD_ARN" --name <county>-appraisal-<date> \
   --input '{
     "county": "<county>", "jurisdictionKey": "<county>_appraiser", "track": "appraisal",
     "sourcePrefix": "outputs/<jobId>/",
@@ -215,8 +216,16 @@ aws stepfunctions start-execution --state-machine-arn "$LOAD_ARN" --name <county
   `county-query-table-publish`; it keys the SSM param, the IPNS label, and the MCP map.
 - **One `statusKey` per track** (`incremental-status/<county>/<track>.json`) — a shared key
   lets tracks clobber each other's `{processed,skipped}` status.
+- **Unique `--name` per (re)start** (`<county>-appraisal-<date>`, `<county>-publish-<date>`).
+  Step Functions keeps execution names unique for ~90 days, so re-running with the SAME name
+  after a stop/finish fails with `ExecutionAlreadyExists`. Because PUBLISH is a per-county
+  **singleton**, before starting one first confirm none is already live:
+  `aws stepfunctions list-executions --state-machine-arn "$PUBLISH_ARN" --status-filter RUNNING`.
 - **Delta tracks with no feeder** (permits): point `feederStateKey` at a MISSING key and set
-  `seedTotal: 1` so completion never fires and it loops forever on daily deltas.
+  `seedTotal: 1` so completion never fires and it loops forever on daily deltas. This is safe
+  by design — the machine's `ReadFeeder` step **catches the missing object** (`Catch:
+  States.ALL → FeederMissing`) and falls back to `nextSourceRowNumber=0`; it does not error on
+  `NoSuchKey`. `deploy.sh` ships exactly this permits example.
 - **Watch:** CloudWatch log group `/ecs/incremental-county` (both `load` and `publish` streams).
 
 ### Stop / wrap-up
