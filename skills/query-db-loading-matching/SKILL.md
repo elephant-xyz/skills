@@ -395,6 +395,50 @@ declaring a run complete. Check actual table/column names in
 Once counts validate by folio, the next step is `county-open-data-publish` (export to
 IPFS + IPNS for MCP/NEO consumption).
 
+## City-portal permits — normalized-JSONL bulk load (2026-07-09, Santa Clara)
+
+Counties whose permits come from **city portals** (San Jose, Palo Alto, …) produce
+**normalized snake_case JSONL**, not the Lee/Accela per-permit detail JSON the bulk
+loader originally expected. Loading them (verified with Santa Clara, 98,592 permits):
+
+1. **Stage the JSONL files to a load prefix** in the env bucket — the loader lists a
+   prefix, it does not take local files:
+   `aws s3 cp <city>-permits-normalized.jsonl s3://<env bucket>/open-data/<county>/permits-load/`
+   (one file per city is fine; the loader lists every `.jsonl` under the prefix).
+2. **Run the permits track with the normalized format** (needs elephant-query-db
+   PR #27, `mapNormalizedCityPermit` + `--permit-format`):
+
+   ```bash
+   AWS_PROFILE=elephant-oracle-node AWS_REGION=us-east-1 npm run load:bulk -- \
+     --tracks permits \
+     --permit-format normalized-jsonl \
+     --permit-prefix open-data/<county>/permits-load/ \
+     --permit-source-system <county>_permits
+   ```
+
+3. **`--permit-source-system` MUST start with the county's underscore slug**
+   (`santa_clara_permits`, not `sanjose_permits`) — the permit-table export filters
+   permits by `source_system LIKE '<county>_%'`; a name without the county prefix
+   loads fine but silently vanishes from the published permit table. The
+   `SourceSystem` type accepts any `` `${string}_permits` ``.
+4. **Verify** with the standard queries above (permit count by county join, and
+   parcel-match rate — normalized permits link by parcel id first, address hash
+   fallback).
+5. **Publish the updated permit table** through the county's running
+   `incremental-county-publish` execution — do NOT re-run a manual export. The
+   machine's trigger is the **S3 flag object**
+   `s3://<env bucket>/incremental-status/<county>/publish-pending.json` set to
+   `{"pending":true}` (it is NOT an SSM parameter — writing SSM does nothing). If
+   the publish execution isn't running, start it with the FULL input from
+   `county-ingest-run` — `{"county","statusBucket","waitSeconds"}`; omitting
+   `statusBucket` fails at runtime with `States.Runtime` on `$.statusBucket`.
+
+Repo gotcha found the same day: `elephant-query-db/.gitignore` had an unanchored
+`coverage/` rule that silently excluded `src/coverage/` from commits (the
+`oracleDatasetCoverage.ts` module was missing from `main` and broke typecheck on fresh
+clones). Rule is now anchored as `/coverage/`; if a fresh clone fails typecheck on a
+missing module, check `.gitignore` before assuming a bad merge.
+
 ## Streamed alternative — the incremental-county LOAD machine
 
 The bulk/script loads here are for backfills and reconciliation. To load a county **as its
