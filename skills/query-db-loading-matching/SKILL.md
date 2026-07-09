@@ -430,8 +430,9 @@ loader originally expected. Loading them (verified with Santa Clara, 98,592 perm
    `s3://<env bucket>/incremental-status/<county>/publish-pending.json` set to
    `{"pending":true}` (it is NOT an SSM parameter — writing SSM does nothing). If
    the publish execution isn't running, start it with the FULL input from
-   `county-ingest-run` — `{"county","statusBucket","waitSeconds"}`; omitting
-   `statusBucket` fails at runtime with `States.Runtime` on `$.statusBucket`.
+   `county-ingest-run` — `{"county": "<county>", "statusBucket": "<env bucket>",
+   "waitSeconds": 3600}`; omitting `statusBucket` fails at runtime with
+   `States.Runtime` on `$.statusBucket`.
 
 Repo gotcha found the same day: `elephant-query-db/.gitignore` had an unanchored
 `coverage/` rule that silently excluded `src/coverage/` from commits (the
