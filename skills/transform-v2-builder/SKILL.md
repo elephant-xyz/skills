@@ -85,6 +85,8 @@ Rules:
 - Use `writeJson(name, value)` for entity outputs only.
 - Use `writeRelationship({ type, name, from, to })` for relationship outputs.
 - Use snake_case filename stems, no `.json` suffix and no subdirectories.
+- Stems must follow the data group's declared cardinality, not the number of instances a page happens to yield. A one-to-many entity takes an index (`tax_1`, `layout_1`, `sales_history_1`) even when a page yields exactly one; a single-cardinality entity does not (`structure`, `utility`, `lot`, `address`). The data group's `one_to_many_relationships` is the source of truth: in County, `property_has_tax` is one-to-many while `property_has_structure` is not.
+- A wrong stem still validates, because validation follows relationships rather than file names, but the query-db loader dispatches on the file name, so a bare stem for a one-to-many entity is recorded as an unrecognized file and never loaded.
 - `from` and `to` must reference stems previously written with `writeJson()`.
 - Do not write directly to filesystem paths.
 - Do not auto-copy seed records; explicitly call `writeJson('address', input.address)` or `writeJson('parcel', input.parcel)` when needed.
