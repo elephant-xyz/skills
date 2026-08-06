@@ -1,92 +1,161 @@
 ---
 name: county-permit-adapter
-description: Build a new county's permit-portal harvester for the oracle-node permit-harvest worker, by adapting the Lee Accela adapter or writing a new vendor module, including source throughput checks and bulk-harvest vs runtime-retrieval decisions. Use when onboarding a county's permit portal, adding permit message types, or debugging per-parcel permit harvest for a county.
+description: Build a new county's permit-portal harvester as a vendor module for the permit-harvest service, by adapting the Accela template or writing a new vendor module, including source throughput checks and bulk-harvest vs runtime-retrieval decisions. Use when onboarding a county's permit portal, adding a permit vendor module, or debugging per-parcel permit harvest for a county.
 metadata:
   author: elephant-xyz
 ---
 
 # County Permit Adapter
 
-The permit-harvest worker (`workflow/lambdas/permit-harvest-worker/`) is a single Lambda
-routing SQS messages by `type`. County adapters are modules; Lee's Accela adapter
-(`lee-accela.mjs`) is the template. Pattern: copy-and-adapt into `<county>-<vendor>.mjs`
-with `<county>-*` message types.
+The `PermitHarvest` Restate service (`services/permit-harvest.ts`) exposes
+`harvestParcel({county, jobId, parcel_id})` and dispatches to the county's vendor module — a plain
+TypeScript module registered with the service. The Accela module is the template:
+copy-and-adapt for Accela counties, reimplement navigation for other vendors.
+Parameterize by county config (agency code, base URL, parcel-format rules) — **never
+hardcode a per-county branch in the dispatch**; that lesson is paid for. The vendor,
+base URLs, and jurisdiction list come from the county's sources catalog
+(`elephant-pipeline/docs/<county>-sources.yaml`, from `county-discovery`). Eligibility
+flow: a `PermitFeed` workflow (key `<CountyIngest key>-permits` — so a redrive pass feeds
+`<county>-<jobId>-r2-permits`), started by `CountyIngest` after appraisal dispatch
+completes, scans the eligibility artifacts (`eligible: true`), rebuilds the eligible-list
+index (`data/artifacts/permits/<county>/<jobId>/eligible.idx`) atomically on every
+PermitFeed pass — the index is stamped with the eligibility-policy fingerprint and never
+reused across policy changes — and spawns `PermitFeedChunk` children (keyed
+`<PermitFeed key>-c<N>`) that dispatch
+`PermitHarvest.harvestParcel` in bounded windows. A malformed `eligibility.json` is
+recorded and skipped, never thrown — one bad manifest must not poison the feeder.
+`Parcel.process` does NOT send permit invocations directly — one send per
+parcel would queue the whole eligible county.
 
-## What an adapter must provide
+**Jurisdiction routing.** A county spans dozens of municipal jurisdictions and
+potentially SEVERAL permit vendors — the sources catalog models exactly this.
+`PermitHarvest` loads the county's sources catalog, resolves each parcel's jurisdiction
+from stored appraisal/seed data (situs city), groups by vendor, and dispatches to the
+matching vendor adapter — multiple adapters per county are normal. An ambiguous or
+unmatched jurisdiction is recorded in the parcel's status JSON as `unrouted` (falling
+back to the county-level portal only when the catalog defines one), and per-jurisdiction
+coverage lives in the status artifacts. The canonical `{county, jobId, parcel_id}`
+payload is unchanged.
 
-Study `lee-accela.mjs` + the `lee-property-first-permit-parcel` handler in `index.mjs`:
+## What a vendor module must provide
 
 1. **Parcel search** — given a parcel id, find that parcel's permit records on the portal.
    Include a `normalizeParcelSearchValue` equivalent: appraisal parcel format usually
    differs from the permit portal's format (punctuation, separators, numeric-only).
 2. **Permit list extraction** — record numbers, types, statuses, detail links; write a
-   permit-list JSON to S3.
-3. **Detail capture** — per permit: raw HTML to S3 + extracted JSON (status, dates, work
+   permit-list JSON to the artifact dir.
+3. **Detail capture** — per permit: raw HTML + extracted JSON (status, dates, work
    location, description, contractors, inspections, fees, related records). Extract
    everything visible; fields without a lexicon home stay in the payload (see
    `validate-county-transform` class-(c) policy).
-4. **Stable S3 keys + resume** — deterministic keys (`safeKeyPart()` for parcel ids),
-   `skipExisting`/`skipCompleted` checks, per-parcel state JSON under
-   `<prefix>/<county>/property-first-state/`. Work must be re-runnable without duplication.
-5. **Neon loading** — map extracted permits to `@elephant-xyz/query-db` rows (Lee:
-   `mapLeePermitDetail` + CSV staging + `ON CONFLICT DO UPDATE`). Link permits to the
-   REQUESTED parcel via explicit target evidence (`propertyFirstTarget`), never via
-   whatever parcel the detail page happens to display — Accela detail pages sometimes show
-   a different parcel, which corrupted early Lee loads.
+4. **Stable keys + resume** — deterministic artifact keys (`safeKeyPart()` for parcel
+   ids), `skipExisting`/`skipCompleted` checks, and a per-parcel status JSON
+   (`status/<folio>.json` — monitoring counts these against the eligible total). Work
+   must be re-runnable without duplication (see `durable-workflow-builder` pattern 3).
+   The harvester writes artifacts + `status/<folio>.json` only — it never merges into
+   the DB and never signals publish itself; DB merging and publish signaling happen via
+   `PermitFeed` → `Loader` (which calls `Publish.requestPublish()` after a permits merge).
+5. **DB row mapping** — MAP extracted permits to `@elephant-xyz/query-db` (the npm
+   package published from the `elephant-query-db` repo) row CSVs staged under the job
+   dir. The actual merge runs via `Loader.load({jobId, tracks:["permits"],
+   step:"incremental"})`, submitted per completed chunk by `PermitFeed` — the `Loader`
+   is the single writer; never merge inline from the harvester.
+   Link permits to the REQUESTED parcel via explicit target
+   evidence (`propertyFirstTarget`), never via whatever parcel the detail page happens to
+   display — Accela detail pages sometimes show a different parcel, which corrupted early
+   Lee loads.
+6. **Browser session where required** — some portals block curl entirely (Palm Beach's
+   ePZB guest endpoints need a Playwright/Puppeteer session bootstrap first). Session
+   setup belongs in the module; keep it reusable across parcels.
 
-## Wiring steps
+Artifact layout: `data/artifacts/permits/<county>/<jobId>/{permit-lists,raw,extracted,status}/…`.
 
-1. Create `workflow/lambdas/permit-harvest-worker/<county>-<vendor>.mjs` (copy
-   `lee-accela.mjs` for Accela counties; for other vendors keep the same exported surface
-   but reimplement navigation — Palm Beach uses pbc.gov ePZB guest endpoints which need a
-   Playwright/Puppeteer session first, curl is blocked).
-2. Register message types in `index.mjs`:
-   - `<county>-property-first-permit-parcel` (handler)
-   - `<county>-property-first-seed-feeder` (or generalize the existing feeder; it is
-     parameterized by message body — source CSV, prefixes, queue URLs, backpressure)
-   - add validation in `validatePermitHarvestMessage()`
-3. S3 layout: `<prefix>/<county>/{permit-lists,raw/permit-details,extracted/permits,property-first-state}/…`.
-4. State machine: `workflow/state-machines/elephant-express.asl.yaml`'s
-   `EnqueuePropertyFirstPermit` currently sends `lee-property-first-permit-parcel`; the
-   message type must be derived per county (parameterize via the workflow message rather
-   than hardcoding a second county branch).
-5. Browser bootstrap is shared: reuse `createBrowser`/`createConfiguredPage` from the
-   worker (Chromium layer, 4 GB Lambda).
+**Date-window backfill (Accela).** Accela list searches cap at ~100 results per query, so
+harvest permit LISTS by date window with binary splitting; workers truncate after page 1
+when a split is pending. A window is **terminal** when its reported total is **below the
+cap** — at ANY span, not only 1-day spans. A split is required only when the total ≥ cap
+AND the span is > 1 day; a 1-day window at the cap cannot split further and is terminal
+by exhaustion (page through it fully). A window whose reported total is UNAVAILABLE is
+treated as at-cap: split it if its span is > 1 day, else paginate it to exhaustion.
+Coverage = the union of days covered by terminal
+windows. `2×totalDays − initialRoots` is a WORST-CASE upper bound on node count, not an
+expected value. The reference county's (Lee) permit history reaches back to 1990-01-01,
+so backfills start there. This is portable vendor knowledge for backfill/delta harvests.
 
-## Testing before deploy
+## Failure handling
 
-- Use the local runner pattern (`scripts/harvest-lee-permits-by-parcel.mjs`) — clone it
-  per county for local Puppeteer runs against a handful of parcels, including:
-  a parcel known to have permits, a permit-less parcel (must complete cleanly, not retry),
-  and a parcel whose detail page shows extra/related records.
-- Add a benchmark mode or short probe run before any full harvest. Measure permit search,
-  list extraction, detail capture, session bootstrap, retry/failure rate, and bytes written
-  for a representative parcel sample. Estimate countywide elapsed time from eligible parcel
-  count, expected permits per parcel, measured latency, safe concurrency, required delays,
-  and retry overhead.
-- `npm run typecheck` and `npm run test` (worker has vitest suites — add county tests
-  mirroring `tests/workflow/lambdas/permit-harvest-worker/lee-accela.test.mjs`).
-- Deploy worker code, send ONE SQS message manually, watch logs.
+Classify per the `durable-workflow-builder` DEAD vs RETRYABLE taxonomy: a permit-less
+parcel or permanently-gone record completes cleanly (recorded as done with zero permits
+— never retried); timeouts, 5xx, and nav failures throw ordinary errors and retry with
+backoff, pausing at max attempts — the paused invocation, visible in the Restate UI, is
+the dead-letter view (fix, then `restate invocations resume`). For a single record
+inside an otherwise-good parcel: a PERMANENT failure is recorded as a failure entry in
+the parcel's status JSON; a TRANSIENT failure retries inside its `ctx.run` and, if
+retries are exhausted, fails the invocation (which pauses) — never silently record a
+transient failure as done. Long detail-heavy parcels either need the `PermitHarvest`
+service's inactivity/abort timeouts raised (`durable-workflow-builder` rule 3) or the
+vendor work split into journaled search → list → detail steps so no single `ctx.run`
+exceeds the window.
+
+## Testing before a full run
+
+- Unit-test the module with vitest against captured fixture HTML/JSON from
+  `county-discovery` samples; `npm run typecheck` and `npm run test`.
+- Local probe: run the module directly (a small script driving Playwright/Puppeteer)
+  against a handful of parcels: one known to have permits, a permit-less parcel (must
+  complete cleanly, not retry), and one whose detail page shows extra/related records.
+- Benchmark before any full harvest: measure permit search, list extraction, detail
+  capture, session bootstrap, retry/failure rate, and bytes written for a representative
+  sample. Estimate countywide elapsed time from eligible parcel count, expected permits
+  per parcel, measured latency, safe concurrency, delays, and retry overhead.
+- Smoke test the deployed service: `docker compose up -d`, `npm run dev`,
+  `restate deployments register http://host.docker.internal:9080`, then invoke ONE parcel.
+  Use a one-way `send`, not `call` — a harvest takes minutes, so a synchronous call times
+  out client-side:
+
+```bash
+curl localhost:8080/restate/send/PermitHarvest/harvestParcel \
+  --json '{"county":"lee","jobId":"smoke-1","parcel_id":"..."}'
+```
+
+  Capture the invocation id from the response, watch that invocation in the Web UI
+  (`http://localhost:9070`) until it completes, then verify the parcel's status artifact
+  (`data/artifacts/permits/<county>/<jobId>/status/<folio>.json`) and the other artifacts
+  (`find data/artifacts/permits/<county>/ -type f`). The handler writes artifacts and
+  status only — no DB rows exist yet. To check DB rows, run the merge explicitly:
+
+```bash
+curl localhost:8080/restate/send/Loader/<county>/load \
+  --json '{"jobId":"smoke-1","tracks":["permits"],"step":"incremental"}'
+```
+
+  wait for that invocation to complete in the UI, THEN inspect DB rows.
 
 ## Throughput rules
 
-- Start `MaximumConcurrency` at 2; raise one step at a time while watching for portal
-  timeouts. Lee Accela degraded above ~4; assume new portals are equally fragile.
+- The `PermitHarvest` concurrency cap IS the portal-politeness control. It is NOT tunable
+  in the Restate UI (server-side flow control is only a 1.7 preview behind experimental
+  flags) — it is an in-process semaphore in the services process, limit from the
+  `CONCURRENCY_PERMIT_<VENDOR>` env var (e.g. `CONCURRENCY_PERMIT_ACCELA=2`). To change
+  it, edit `.env` and restart the services process — safe mid-run, because in-flight
+  invocations resume from their journals (`durable-workflow-builder` pattern 2, the gate
+  helper). Start at 2; raise one step at a time while watching error rates and portal
+  timeouts in the Web UI. Lee Accela degraded above ~4; assume new portals are equally
+  fragile.
+- Long multi-week harvests need proxy capacity/rotation configured on the vendor module
+  (proxy URL(s) in the module's config) BEFORE raising concurrency — a single datacenter
+  IP gets rate-limited or blocked over a long harvest.
 - Before scaling beyond the pilot, record the portal's safe concurrency and the estimated
   full permit-download time in the county findings doc. If the estimate is more than
   48 hours, stop and ask whether permits should be downloaded anyway, ingested into the
   query DB, or retrieved at runtime. For runtime retrieval, ask which app/service owns it
   and whether lookup should use direct portal/API calls, server-side scraping, cache,
   queued background fetch, or another pattern.
-- Per-record page-wait timeouts that fail an entire batch are worse than skipping —
-  follow the worker's partial-batch-response pattern, and prefer recording a failure entry
-  over throwing.
-- DLQ has `maxReceiveCount: 5`; check it after any deploy.
 
 ## Persist your work
 
-Adapter + worker changes are committed in `oracle-node` on the county branch. Anything
-that lives outside oracle-node's deploy path — local runner scripts, portal exploration
-notes, endpoint/session documentation — gets committed and PR'd to
+Vendor modules and service changes are committed in `elephant-pipeline` on the county
+branch. Anything outside the pipeline project — probe scripts, portal exploration notes,
+endpoint/session documentation — gets committed and PR'd to
 `github.com/elephant-xyz/Counties-trasform-scripts` under `<county>/` (`gh pr create`)
 so it isn't lost when this machine moves on.

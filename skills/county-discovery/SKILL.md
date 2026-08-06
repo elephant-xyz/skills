@@ -1,6 +1,6 @@
 ---
 name: county-discovery
-description: Research a new US county before onboarding it to the oracle-node ingestion pipeline - appraiser portal, permit portal vendor, parcel id format, bulk data sources, anti-bot posture, source performance, and bulk-ingest vs runtime-retrieval feasibility. Use when asked to onboard, evaluate, or scope a new county, or when planning appraisal/permit scraping for a county not yet ingested.
+description: Research a new US county before onboarding it to the ingestion pipeline - appraiser portal, permit portal vendor, parcel id format, bulk data sources, anti-bot posture, source performance, and bulk-ingest vs runtime-retrieval feasibility. Use when asked to onboard, evaluate, or scope a new county, or when planning appraisal/permit scraping for a county not yet ingested.
 metadata:
   author: elephant-xyz
 ---
@@ -9,15 +9,15 @@ metadata:
 
 Source preferences (which appraisal/permit websites, prior findings, additional sources)
 come from the `onboard-county` intake — don't re-ask what's already established. If
-entered directly without that context, gather those answers once (plus
-`AWS_PROFILE`/`AWS_REGION`) before probing, then proceed without further check-ins.
+entered directly without that context, gather those answers once before probing, then
+proceed without further check-ins.
 
 Produce a county profile document before writing any code. The profile feeds every later
 stage: seed data, browser flow, transform scripts, permit adapter, eligibility mapping.
 
 ## Output
 
-Write findings to `oracle-node/docs/<county>-county-findings.md`. Required sections:
+Write findings to `elephant-pipeline/docs/<county>-county-findings.md`. Required sections:
 
 1. **Appraiser portal** — base URL, per-parcel detail URL pattern, search mechanism,
    access mode per artifact (plain fetch / modified request replaying a hidden API /
@@ -47,19 +47,20 @@ When the profile is complete, commit it and push a copy to
 `github.com/elephant-xyz/Counties-trasform-scripts` under `<county>/docs/` on a branch,
 and open a PR (`gh pr create`) so the findings survive outside this machine. Include any
 probe/exploration scripts you wrote; reference (don't commit) large sample captures by
-their S3 or `downloads/` location.
+their `data/artifacts/...` path or `downloads/` location.
 
 ## Workflow
 
 1. Check prior art first:
-   - `oracle-node/docs/` for existing findings docs (Lee is the reference).
-   - `transform/<county>/` in oracle-node and the county folder in
+   - `elephant-pipeline/docs/` for existing findings docs and sources catalogs (Lee is
+     the reference).
+   - `elephant-pipeline/transforms/<county>/` and the county folder in
      `github.com/elephant-xyz/Counties-trasform-scripts` — if transform scripts exist,
      the appraisal side has been at least partially solved before. **Check ALL name
      variants INCLUDING SPACES** (e.g. folder `palm beach`, not just `palm-beach` /
-     `palm_beach`) — the scripts-manager matches spaces/underscores/hyphens; don't rebuild
-     an already-shipped transform.
-   - `browser-flows/` for an existing flow JSON for the county.
+     `palm_beach`) — matching tolerates spaces/underscores/hyphens; don't rebuild an
+     already-shipped transform.
+   - `elephant-pipeline/flows/` for an existing browser-flow JSON for the county.
 2. Enumerate official data sources via the NETR Online directory:
    `https://publicrecords.netronline.com/state/<STATE>/county/<county>` — it lists the
    county's assessor/appraiser, recorder, tax collector, GIS/mapping, and
@@ -144,43 +145,53 @@ of the pointers — knowledge that survives people and scales to all of Florida,
 This is an **agent capability to build, not a county you hand-probe once.**
 
 **Output a source catalog** alongside the findings doc:
-`oracle-node/docs/<county>-sources.yaml` — one machine-readable registry of
-`{jurisdiction -> data/permit source URL, vendor, search support, status}`. See
-`palm-beach-sources.yaml` for the schema (countywide appraisal/sunbiz/bbb/gis blocks +
-a `permits:` list, one row per jurisdiction).
+`elephant-pipeline/docs/<county>-sources.yaml` — one machine-readable registry:
+countywide appraisal/sunbiz/bbb/gis blocks plus a `permits:` list, one row per
+jurisdiction, each `{jurisdiction, url, vendor, search support, probe result, throughput
+measurements, status}`. For example (Palm Beach):
 
-Tooling lives in `oracle-node/scripts/permit-source-discovery/`:
-- `vendors.mjs` — `classifyVendor({url, html})` against a signature library
-  (Accela, Tyler EPL/Civic Access, Click2Gov/aspgov, OpenGov, CentralSquare/eHub,
-  ePZB county-custom, GovAccess). Extend the library as new vendors appear.
-- `discover.mjs` — given the jurisdiction list, resolves + classifies candidate portal
-  URLs and writes catalog rows (`status: discovered` or `needs-review`). It does NOT do
-  web search — **finding each city's official permit page is the LLM agent's job**; the
-  script resolves/classifies candidates and flags misses for you to research.
-- `certify.mjs <county-sources.yaml>` — probes every catalogued portal, asserts it is
-  live and its detected vendor matches the catalog. **This is the acceptance test for
-  "the agent can discover sources"** — run it and report the pass/mismatch/unreachable
-  summary; an uncertified catalog is not done.
+```yaml
+county: palm-beach
+appraisal: {url: "https://pbcpao.gov", mode: plain-http-api}
+permits:
+  - {jurisdiction: unincorporated, vendor: epzb, url: "https://pbc.gov/ePZB",
+     search: by-pcn, probe: playwright-required, throughput: "~2 req/s @ conc 2",
+     status: needs-review}  # → discovered → certified as probes pass
+```
+
+Downstream skills
+(seed data, permit adapter) consult it — it is the durable output of discovery.
+
+Vendor identification is by signature against the known library — Accela, Tyler
+EPL/Civic Access, Click2Gov/aspgov, OpenGov, CentralSquare/eHub, ePZB (county-custom),
+GovAccess — from the portal's URL shape and page markup. Extend the library in the
+catalog notes as new vendors appear. Probing is done directly with Playwright/curl
+during discovery; finding each city's official permit page is the agent's job, via
+web search and the NETR directory.
 
 Procedure per county:
-1. Enumerate jurisdictions (county GIS `PZB/Municipalities` layer or Census places) into a
-   list; seed the catalog's `permits:` with one row per jurisdiction.
-2. Run `discover.mjs` to auto-resolve the easy ones; for each `needs-review`, web-search
-   `"<city> <state> building permit search"`, open the official portal, confirm it.
-3. `classifyVendor` each portal; record vendor + search-by-parcel/address support +
-   session/bootstrap needs (some need a Playwright session, e.g. PB unincorporated ePZB).
+1. Enumerate jurisdictions (county GIS municipalities layer or Census places); seed the
+   catalog's `permits:` with one row per jurisdiction, `status: needs-review`.
+2. For each jurisdiction, web-search `"<city> <state> building permit search"`, open the
+   official portal, confirm it, classify the vendor, and record search-by-parcel/address
+   support + session/bootstrap needs (some need a Playwright session, e.g. PB
+   unincorporated ePZB). Flip `status` to `discovered`.
+3. Re-probe every catalogued portal before banking: assert it is live and its detected
+   vendor matches the catalog row. **This certification pass is the acceptance test for
+   "the agent can discover sources"** — report the pass/mismatch/unreachable summary; an
+   uncertified catalog is not done.
 4. Reuse/build a harvester per vendor via the `county-permit-adapter` skill (one adapter
    serves every jurisdiction on that vendor — the leverage that makes 25k-60k tractable).
-5. Run `certify.mjs` and bank the catalog (commit + push with the findings doc).
+5. Bank the catalog (commit + push with the findings doc).
 
 ## Reference example
 
 Lee County profile: Accela at `aca-prod.accela.com/LEECO/...` (no CAPTCHA, tolerates
 concurrency ~3-4), appraiser `leepa.org` via browser flow with STRAP search, seeds from
-the county roll at `s3://counties-seeds/lee.csv` (~516k parcels). Treat Lee permits as
-the example for source feasibility: measure permit-list and permit-detail throughput,
-then estimate the countywide harvest before deciding whether to prefetch everything or
-serve permit history through runtime lookup.
+the county roll at `data/seeds/lee.csv` (~516k parcels). Treat Lee permits as the
+example for source feasibility: measure permit-list and permit-detail throughput, then
+estimate the countywide harvest before deciding whether to prefetch everything or serve
+permit history through runtime lookup.
 
 Palm Beach (prototyped): appraiser is a **plain-HTTP API, no browser flow** —
 `POST pbcpao.gov/AutoComplete/SearchAutoComplete` (body `propertyType=RE&searchText=<q>`

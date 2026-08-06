@@ -1,15 +1,15 @@
 ---
 name: county-open-data-publish
-description: Publish county property data from the Neon query DB to IPFS as open data — one JSON file per property + a sharded index, uploaded to Filebase (S3-compatible IPFS), with a stable IPNS name re-pointed on every publish so downstream MCP/NEO never change. Use when exporting consolidated property JSON, uploading to Filebase, managing the IPNS pointer, or wiring an MCP server to read the published index.
+description: Publish county property data from the query DB to IPFS as open data — one JSON file per property + a sharded index, uploaded to Filebase (S3-compatible IPFS), with a stable IPNS name re-pointed on every publish so downstream MCP/NEO never change. Use when exporting consolidated property JSON, uploading to Filebase, managing the IPNS pointer, or wiring an MCP server to read the published index.
 metadata:
   author: elephant-xyz
 ---
 
 # County Open-Data Publish (IPFS)
 
-Publishes the county property dataset from the `elephant-query-db` Neon DB to **public
-IPFS via Filebase**, as the open-data layer that the MCP server (and NEO) read. This is
-the Story-2 publish step that follows `query-db-loading-matching`.
+Publishes the county property dataset from the `elephant-query-db` DB to **public IPFS
+via Filebase**, as the open-data layer that the MCP server (and NEO) read. This is the
+publish step that follows `query-db-loading-matching`.
 
 The model: **1 JSON file per property** + a **sharded index** (`shards/shard-NNNN.json`
 + a small `index.json`) + a flat `manifest.json` for back-compat. Each consolidated JSON
@@ -20,75 +20,95 @@ re-config**.
 > **Lee County, FL** is the reference implementation. IPNS label `oracle-open-data-lee`,
 > IPNS name `k51qzi5uqu5dlzgslzedrnk4whtd7ip69l0pmd3zxelz8hwjorbeyy0pyyeu4m`.
 
-## ⚠️ PII / human-in-the-loop
+## ⚠️ PII / human-in-the-loop — the durable approve gate
 
-Bulk PII → public IPFS is a **human-run** step. An agent prepares and verifies the
-export and the wiring, but **a human runs the actual upload** of PII-bearing property
-data to public IPFS. Do not auto-upload.
+Bulk PII → public IPFS is **human-gated**. The county's `Publish` virtual object dry-runs
+(export + validate, no upload, no IPNS write) until a human calls:
 
-## Pipeline overview
-
-```
-Neon query DB
-  │  npm run export:property-consolidation -- --shard-size 10000   (in elephant-query-db)
-  ▼
-local export dir:  <prop-cid>.json (one per property, ~22 KB each)
-                   shards/shard-NNNN.json   (sharded index, ~10k props/shard)
-                   index.json               (small: lists the shard CIDs)
-                   manifest.json            (flat, back-compat)
-  │  npm run publish:ipfs-upload            (Filebase, S3-compatible IPFS)
-  ▼
-Filebase bucket  + IPNS name re-pointed at the new index CID
-  │  MCP resolves IPNS → index → property CIDs
-  ▼
-MCP server (per-consumer Nitro deploy) → NEO
+```bash
+curl localhost:8080/restate/call/Publish/<county>/approve --json '{}'
 ```
 
-CIDs are **pre-computed locally** with `ipfs-only-hash` before upload — its algorithm
-matches Filebase's, so there is no need to read CIDs back from S3 metadata (see Bug C).
+Approval is durable state on the object — set once per county, survives restarts. An
+agent prepares and verifies everything up to the gate; **only a human approves**.
+
+## How it runs — the `Publish` virtual object
+
+Export + upload run as handlers on the county's **`Publish` virtual object**
+(`services/publish.ts` in `elephant-pipeline`; see `durable-workflow-builder` patterns
+8–10). Author `services/publish.ts` per `durable-workflow-builder` patterns 9–10 first —
+these handlers are the contract you build, not a prebuilt service. `requestPublish()` (called by the `Loader` after a load validates, or by hand)
+marks the county pending — and **arms the first `tick()` when none is scheduled**
+(persist a `tickScheduled` flag; each tick re-arms exactly one successor), so a fresh
+county never sits pending forever; the self-scheduling `tick()` runs export → validate →
+upload → IPNS re-point as `ctx.run` steps.
+
+State-machine precision (matches `durable-workflow-builder` pattern 10): an unapproved
+`tick()` dry-runs and LEAVES `pending=true`; `approve()` arms an immediate tick when
+pending; `pending` clears only after a successful APPROVED publication. Throttle the
+wait: an unapproved tick dry-runs ONCE per content watermark (persist
+`lastDryRunWatermark`) and stops re-arming until `approve()` or a newer
+`requestPublish()` — never rebuild the multi-GB export every tick while waiting for
+approval.
+
+- **Singleton per county is structural** — the virtual object is single-writer, so a
+  second publish request queues; no execution-listing or "is one already running?" checks.
+- **No platform hard cap once `Publish`'s inactivity/abort timeouts are raised** — the
+  export/upload steps exceed Restate's 10-min default abort timeout, which would
+  abort-and-retry them mid-step; raise the timeouts per `durable-workflow-builder`
+  authoring rule 3, then a multi-hour export/upload is fine. If the services process dies
+  mid-step, restart it and the invocation resumes.
+  ⚠️ Laptop sleep still stalls the current step: for multi-hour uploads run
+  `caffeinate -i -s` or run the services process detached on a machine that stays up.
+- Export output stages to **`data/artifacts/publish/<county>/`** (under `DATA_DIR` in the
+  `elephant-pipeline` checkout), then uploads to the county's Filebase bucket.
 
 ## Sizing (real numbers, Lee 512k)
 
-- Consolidated JSON ≈ **22 KB each** → ~**11 GB** for 512k properties. (NOT ~80 GB — an
-  early over-estimate; the consolidated record is compact.)
+- Consolidated JSON ≈ **22 KB each** → ~**11 GB** for 512k properties (NOT ~80 GB — an
+  early over-estimate).
 - `--shard-size 10000` → ~52 shards for 512k.
-- Upload throughput: **~310 objects/sec at `--concurrency 64`** → **~25–30 min** for 512k.
-- Export: ~1–3 h depending on DB CU and machine.
+- Upload: **~310 objects/sec at `--concurrency 64`** → ~25–30 min for 512k.
+- Export: with the local Postgres, minutes-to-an-hour class; a remote DB adds every
+  round-trip's latency.
 
 ## Step 1 — Export
 
-In the **`elephant-query-db`** checkout:
+In the **`elephant-query-db`** checkout (DB from `DATABASE_URL`):
 
 ```bash
-npm run export:property-consolidation -- --shard-size 10000
+npm run export:property-consolidation -- --county <county> --shard-size 10000 \
+  --out-dir "$DATA_DIR/artifacts/publish/<county>"
 ```
 
-Produces, in the export dir: one `<cid>.json` per property, `shards/shard-NNNN.json`,
-`index.json` (the sharded index), and `manifest.json` (flat back-compat). DB connection
-comes from `DATABASE_URL` (the catalog plain `DATABASE_URL`, `ep-mute-leaf`).
+Every stage is county-parameterized — pass the same `--county <county>` slug through
+export, upload, and IPNS so nothing falls back to the reference county. The explicit
+`--out-dir` enforces the promised staging location (`data/artifacts/publish/<county>/`
+under `DATA_DIR`); the Step 2 upload consumes exactly that directory. Confirm the
+export script on `elephant-query-db` `main` actually accepts `--county` and `--out-dir`;
+if it doesn't yet, add them before running (doc ≠ code).
 
-> **⚠️ Pass `DATABASE_URL` INLINE and UNQUOTED** until the env-parser quote-strip fix
-> (Bug A) is confirmed on `main`. Prefix the command with the raw value —
-> `DATABASE_URL=postgres://… npm run export:property-consolidation -- --shard-size 10000` —
-> not a quoted value in a `.env`. A quoted URL parses the host as literally `base`
-> (`getaddrinfo ENOTFOUND base`), and the export silently emits nothing.
+Produces one `<cid>.json` per property, `shards/shard-NNNN.json`, `index.json`, and
+`manifest.json`. CIDs are **pre-computed locally** with `ipfs-only-hash` — its algorithm
+matches Filebase's, so nothing needs to be read back from S3 metadata (see Bug C).
 
-### ⚠️ Appraisal addresses are free-text only — parse them (2026-06-25)
+> **⚠️ `.env` quote trap (Bug A):** if the env loader doesn't strip surrounding quotes, a
+> quoted `DATABASE_URL` parses the host as literally `base`
+> (`getaddrinfo ENOTFOUND base`) and the export silently emits nothing. Pass the URL
+> inline/unquoted if in doubt.
 
-The appraisal source (`source_system='lee_appraiser'`) populates **only**
-`addresses.unnormalized_address` (a free-text single line like
-`"5845 CORPORATION CIRCLE, FORT MYERS, FL 33905"`). The structured columns
-`street_number / street_name / street_suffix_type / city_name / latitude` are **100% null**
-(verified: 0 of 511,968 Lee rows). An export that reads only the structured columns emits a
-**null address for the entire county** — silent, because every row is "successfully" exported.
+### ⚠️ Appraisal addresses are free-text only — parse them
 
-The export must parse `unnormalized_address` (format `"STREET, CITY, STATE ZIP"`) into the
-discrete `street` / `city` / `postalCode` fields NEO renders, with structured columns still
-winning when present (other sources). **Do NOT parse the state from the text:** the DB
-`state_code` is `FL`-or-null (never a wrong value) and NEO falls back to `parcel.stateCode`
-(FL for 100% of parcels); a parsed state token would inject wrong source values ("MI", "NC")
-into the ~7% of rows whose `state_code` is null. `latitude/longitude` come from the
-`geometries` table, not `addresses` (geometry is present for 100% of properties).
+The appraisal source populates **only** `addresses.unnormalized_address` (one line:
+`"5845 CORPORATION CIRCLE, FORT MYERS, FL 33905"`); the structured
+`street_number/street_name/city_name/latitude` columns are **100% null** (verified: 0 of
+511,968 Lee rows). An export reading only structured columns emits a **null address for
+the entire county** — silently, every row "succeeds". The export must parse
+`unnormalized_address` (`"STREET, CITY, STATE ZIP"`) into `street`/`city`/`postalCode`,
+structured columns winning when present. **Do NOT parse the state from the text** — the
+DB `state_code` is correct-or-null and NEO falls back to `parcel.stateCode`; a parsed
+token injects wrong values into the null rows. `latitude/longitude` come from the
+`geometries` table, not `addresses`.
 
 ## Step 2 — Upload to Filebase
 
@@ -96,261 +116,177 @@ into the ~7% of rows whose `state_code` is null. `latitude/longitude` come from 
 npm run publish:ipfs-upload
 ```
 
-Resumable (writes a checkpoint; re-run to continue). **⚠️ Before a CORRECTED re-publish,
-delete the stale checkpoint** (`.upload-runs/filebase-upload-checkpoint.json`): it skips by
-S3 key (`properties/<uuid>.json`), not by content, so a leftover checkpoint from a previous
-run will silently skip re-uploading every file and the fix never reaches IPFS. Required env:
+Running this directly is a manual **break-glass path** — the normal path is `Publish.tick`
+after the durable approval; before running it by hand, confirm the `Publish/<county>`
+approved flag in the Restate UI.
 
-| Variable | Value / source |
+This Filebase S3 client (`@aws-sdk/client-s3` pointed at `https://s3.filebase.io`) is the
+pipeline's **only remaining S3-protocol dependency** — it talks to Filebase's upload API
+for IPFS pinning (an external publishing service), not to storage we run.
+
+Resumable (checkpoint; re-run to continue). **⚠️ Before a CORRECTED re-publish, delete
+the stale checkpoint**
+(`$DATA_DIR/checkpoints/publish/<county>/<bucket>/filebase-upload-checkpoint.json`): it skips by S3
+key, not content, so a leftover checkpoint silently skips every re-upload and the fix
+never reaches IPFS. **⚠️ Checkpoints must be scoped per county/bucket** — a checkpoint
+shared across county buckets once cross-contaminated a publish: the uploader skipped
+files it had uploaded to a DIFFERENT county's bucket, so this county's bucket silently
+missed them. Required env (Filebase creds live in `elephant-pipeline/.env` or a
+local secrets file — never in the repo):
+
+| Variable | Value |
 |---|---|
-| `S3_ACCESS_KEY_ID` | Filebase access key (vault `Credentials/filebase-oracle-open-data`) |
-| `S3_SECRET_ACCESS_KEY` | Filebase secret key (same vault note) |
-| `S3_BUCKET` | `elephant-oracle-open-data` |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | Filebase keys |
+| `S3_BUCKET` | `elephant-oracle-open-data-<county>` |
 | `S3_ENDPOINT` | `https://s3.filebase.io` |
-| `FILEBASE_IPNS_LABEL` | `oracle-open-data-lee` (per-county) |
+| `FILEBASE_IPNS_LABEL` | `oracle-open-data-<county>` |
 
-> **⚠️ Each county needs its OWN Filebase bucket.** The upload writes FIXED keys
-> (`index.json` / `manifest.json` / `shards/shard-*.json`), so reusing a bucket clobbers the
-> other county and can unpin its CIDs. Use a per-county `S3_BUCKET` + per-county
-> `FILEBASE_IPNS_LABEL`.
+**Per-county env convention (what the `Publish` object reads).** One services process
+serves multiple counties and two datasets (this consolidation export and the query
+table), so the bucket is configured per county per dataset:
+**`FILEBASE_OPEN_DATA_BUCKET_<COUNTY>`** (this skill; `county-query-table-publish` uses
+`FILEBASE_QUERY_TABLE_BUCKET_<COUNTY>`), with shared `FILEBASE_ACCESS_KEY` /
+`FILEBASE_SECRET_KEY` (or `..._<COUNTY>` variants when a county's credentials differ).
+`<COUNTY>` is the envPart normalization — slug uppercased, non-alphanumeric runs → `_`
+(`palm-beach` → `PALM_BEACH`). The `Publish` object resolves these from its own key
+(`ctx.key` = the county slug) per dataset and **rejects missing/mismatched config with a
+`TerminalError`** — never a generic `S3_BUCKET` fallback. IPNS labels stay derived
+(`oracle-open-data-<county>`), not configured. The generic `S3_*` names in the table are
+what the upload script consumes; the object maps the per-county vars onto them.
+
+> **⚠️ Each county needs its OWN Filebase bucket + IPNS label.** The upload writes FIXED
+> keys (`index.json` / `manifest.json` / `shards/shard-*.json`), so reusing a bucket
+> clobbers the other county and can unpin its CIDs.
 >
-> **⚠️ Reusing a bucket that held a SAMPLE / pilot run republishes a STALE index.** The
-> fixed `index.json` key from the earlier small run is still in the bucket, and a leftover
-> upload checkpoint makes the uploader skip re-writing it — so IPNS gets re-pointed at the
-> OLD sample index (e.g. a few hundred properties) even though the full per-property files
-> uploaded fine. Before a full run into a bucket that ever held a sample: delete the stale
-> checkpoint (`.upload-runs/filebase-upload-checkpoint.json`) AND confirm the published
-> `index.json` CID equals the CID of the export's freshly-generated `index.json`, and that
-> it resolves to the FULL `propertyCount` — not the sample count (see Verification).
+> **⚠️ A bucket that ever held a SAMPLE run republishes a STALE index.** The old small
+> `index.json` is still at the fixed key and a leftover checkpoint skips re-writing it —
+> IPNS gets re-pointed at the OLD sample index even though the per-property files
+> uploaded fine. Delete the checkpoint AND confirm the published `index.json` CID equals
+> the freshly-exported one, resolving to the FULL `propertyCount`.
 
-Tune `--concurrency 64` for ~310 obj/s. The uploader **auto-derives the IPNS auth token
-from the S3 keys** (see Step 3) and **upserts the IPNS name** at the end — no separate
-token needed.
+The uploader auto-derives the IPNS auth from the S3 keys and upserts the IPNS name at the
+end — no separate token needed.
+
+> **⚠️ Very long uploads from distant networks have failed with `EADDRNOTAVAIL` and
+> SILENT partial output that looks like success** — always reconcile the uploaded-object
+> count against the export manifest before re-pointing IPNS.
 
 ## Step 3 — IPNS (the always-latest pointer)
 
-The IPNS name is what makes re-publishing free for consumers: the **same name** is
-re-pointed at the new index CID on every publish → MCP/NEO never change.
+The **same name** is re-pointed at the new index CID on every publish → MCP/NEO never
+change. Use the **Filebase Platform API** at **`https://api.filebase.io/v1/names`**
+(NOT `/v1/ipns` — that path does not exist; see Bug D).
 
-Use the **Filebase Platform API** at **`https://api.filebase.io/v1/names`**
-(NOT `/v1/ipns` — that path does not exist).
-
-- **Auth** = `Authorization: Bearer base64(S3_ACCESS_KEY_ID:S3_SECRET_ACCESS_KEY)`.
-  Derived directly from the S3 keys — there is **NO separate API token** to obtain.
-- **Operations:**
-  - `GET  /v1/names` — list names.
-  - `POST /v1/names` body `{"label": "...", "cid": "..."}` — create.
-  - `PUT  /v1/names/{label}` body `{"cid": "..."}` — re-point (this is the re-publish op).
+- **Auth** = `Authorization: Bearer base64(S3_ACCESS_KEY_ID:S3_SECRET_ACCESS_KEY)` —
+  derived from the S3 keys; there is **NO separate API token**.
+- `GET /v1/names` list · `POST /v1/names` `{"label","cid"}` create ·
+  `PUT /v1/names/{label}` `{"cid"}` re-point (the re-publish op).
 - The response field **`network_key`** is the resolvable `k51…` IPNS name.
 
-The uploader does this automatically (create-or-update). To re-point by hand:
+Manual re-point — a **break-glass path** only: the normal path is `Publish.tick` after the
+durable approval; before mutating IPNS by hand, confirm the `Publish/<county>` approved
+flag in the Restate UI:
 
 ```bash
 AUTH=$(printf '%s:%s' "$S3_ACCESS_KEY_ID" "$S3_SECRET_ACCESS_KEY" | base64)
-curl -X PUT "https://api.filebase.io/v1/names/oracle-open-data-lee" \
-  -H "Authorization: Bearer $AUTH" \
-  -H "Content-Type: application/json" \
+curl -X PUT "https://api.filebase.io/v1/names/oracle-open-data-<county>" \
+  -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" \
   -d '{"cid":"<new index cid>"}'
 ```
 
 ## Step 4 — MCP reads IPNS
 
-The MCP server resolves the IPNS name → fetches the index. It **auto-detects** sharded
-`index.json` vs flat `manifest.json` (parse as the sharded schema; on failure, fall back
-to the flat manifest at the same IPNS-resolved CID).
+The MCP resolves the IPNS name → fetches the index (auto-detects sharded `index.json` vs
+flat `manifest.json`).
 
 **IPNS resolution must be header-based.** Public gateways **dropped the Kubo RPC**
-`/api/v0/name/resolve` endpoint (returns "Kubo RPC is not here"). Resolve via a HEAD
-request and read the **`x-ipfs-roots`** response header:
+`/api/v0/name/resolve` endpoint. Resolve via a HEAD request and read the
+**`x-ipfs-roots`** response header, against `https://<name>.ipns.dweb.link/` or
+`https://ipfs.filebase.io/ipns/<name>`.
 
-- `https://<name>.ipns.dweb.link/`
-- `https://ipfs.filebase.io/ipns/<name>`
+MCP env: `ORACLE_OPEN_DATA_IPNS=<name>` (leave any fixed index-CID env unset so IPNS is
+the single source of truth). **Multi-county:** `ORACLE_OPEN_DATA_IPNS_MAP` (JSON
+`{"lee":"k51…","palm-beach":"k51…"}`) + `ORACLE_OPEN_DATA_DEFAULT_COUNTY`; NEO must pass
+`county` and point `ORACLE_MCP_URL` at the STABLE MCP alias, not a pinned deployment URL.
 
-MCP env: set `ORACLE_OPEN_DATA_IPNS=<name>` and leave the fixed index-CID env unset, so
-IPNS is the single source of truth.
-
-**Multi-county MCP:** the MCP resolves the open-data IPNS per `county` via
-`ORACLE_OPEN_DATA_IPNS_MAP` (JSON `{"lee":"k51…","palm-beach":"k51…"}`) plus
-`ORACLE_OPEN_DATA_DEFAULT_COUNTY`. NEO must pass `county` to the MCP tools (the county
-switcher) and point `ORACLE_MCP_URL` at the STABLE MCP alias (`<project>-<team>.vercel.app`),
-NOT a pinned deployment URL — pinned URLs go stale on every deploy.
-
-> **⚠️ Vercel "sensitive + empty" env trap when adding a county to the map.** Two Vercel
-> footguns compound here: (1) an env var created as **Sensitive** cannot be read back and,
-> if it was ever saved empty/blank, silently serves an empty value — the MCP then resolves
-> NO county. Set `ORACLE_OPEN_DATA_IPNS_MAP` as a **PLAIN** (non-sensitive) var via the REST
-> API and **verify it with `?decrypt=true`** (GET
-> `/v9/projects/<id>/env?decrypt=true`) so you actually confirm the JSON that will be
-> injected. (2) Vercel binds env vars only to **NEW deployments** — updating the var does
-> nothing to the running deployment. After setting the map you MUST **REDEPLOY**, then
-> re-verify the county resolves through the live MCP.
+> **⚠️ Vercel "sensitive + empty" env trap (MCP app).** (1) A **Sensitive** env var can't
+> be read back and, if ever saved blank, silently serves empty — the MCP resolves NO
+> county. Set `ORACLE_OPEN_DATA_IPNS_MAP` as a **PLAIN** var and verify with
+> `GET /v9/projects/<id>/env?decrypt=true`. (2) Env binds only to **NEW deployments** —
+> after any env change you MUST **REDEPLOY**, then re-verify through the live MCP.
 
 ## The geo / value index is a SEPARATE publish (parameterize by county first)
 
-The property-consolidation publish above is NOT the only index. NEO's map/search also
-consumes a **geo + value index** (bounding-box / value-range lookup), produced by its own
-export + upload — a distinct step with its own output and its own IPNS/CID wiring. Two
-traps:
+NEO's map/search also consumes a **geo + value index** (bounding-box / value-range),
+produced by its own export + upload with its own IPNS/CID wiring. Two traps:
 
-- **It is easy to forget** — publishing only the property-consolidation index leaves NEO's
-  map layer empty even though property lookups work. Treat the geo/value index as a required
-  second publish for any county whose data NEO renders on a map.
-- **Its export was Lee-hardcoded** (county slug / source_system baked in). **Parameterize it
-  by county BEFORE running for a new county** — an un-parameterized run either fails or emits
-  Lee's geometry under the new county's name. Verify the geo index's `propertyCount` matches
-  the county's reconciled folio count, same as the consolidation index.
+- **It is easy to forget** — publishing only the consolidation index leaves NEO's map
+  layer empty even though property lookups work. Treat it as a required second publish
+  for any county NEO maps.
+- **Its export was once hardcoded to the reference county.** Parameterize it by county
+  BEFORE running for a new one — an un-parameterized run fails or emits the reference
+  county's geometry under the new county's name. Verify its `propertyCount` matches the
+  reconciled folio count, same as the consolidation index.
 
 ## Bugs caught + fixed (do not re-hit)
 
-> ⚠️ **These fixes have drifted off `elephant-query-db` `main` once already.** Bugs B, C, D
-> below were documented here but the actual fixes lived on an un-merged branch, so a later
-> publish run from `main` re-hit all of them live. **Before publishing, confirm the
-> `upload-consolidation-to-filebase.ts` / export code on `main` actually contains these
-> fixes** (re-landed in elephant-query-db PR for the 2026-06-25 publish). Doc ≠ code.
+> ⚠️ These fixes have drifted off `elephant-query-db` `main` once already — a later
+> publish from `main` re-hit B, C, D live. **Before publishing, confirm the upload/export
+> code on `main` actually contains them.** Doc ≠ code.
 
-**A. `.env` quote-stripping.** The env loader did not strip surrounding quotes from
-values, so a quoted `DATABASE_URL` (or any host) parsed wrong — the DB host came through
-as literally `base`, failing with `getaddrinfo ENOTFOUND base`. Strip surrounding quotes
-when reading `.env`.
-
-**B. Double export-dir prefix.** The manifest stores `filePath` WITH the export-dir prefix
-already, so `join(exportDir, entry.filePath)` doubles it → `ENOENT` fatal on the first file.
-Build the path from the relative key (`properties/<uuid>.json`), not `entry.filePath`.
-
-**C. Per-upload S3 deserialize middleware is NOT concurrency-safe.** Reading the
-`x-amz-meta-cid` response header via a deserialize middleware added by a fixed name to the
-**shared** S3 client caused `Duplicate middleware name` and cross-request header
-contamination at `--concurrency > 1`. **Two valid fixes** — either drop the middleware and
-trust the locally pre-computed CID (`ipfs-only-hash` yields the same CID as Filebase), or
-attach the middleware to **each `PutObjectCommand`'s own stack** (`command.middlewareStack.add`,
-isolated per call) which keeps the Filebase read-back as a cross-check. Main uses the
-command-scoped form. Either way: **never add the capture middleware to the shared client.**
-
-**D. IPNS update `404`.** The uploader hit `https://api.filebase.io/v1/ipns` with an
-`_id`-keyed PUT — that path does not exist. The real API is `/v1/names`, **label-keyed**
-(see Step 3), name = `record.network_key`. Symptom: upload succeeds, `ipns_update_failed:
-… 404`, pointer never moves, consumers stay on the old CID.
-
-**E. Silent IPNS skip when the bearer is unset.** If `FILEBASE_API_TOKEN` is empty the run
-"succeeds" but logs `skipping IPNS update` and the pointer never moves. The uploader now
-**auto-derives** the bearer = `base64(S3_ACCESS_KEY_ID:S3_SECRET_ACCESS_KEY)` so only the S3
-keys + `FILEBASE_IPNS_LABEL` are needed. Always confirm the final log shows the IPNS name
-bumped to the new sequence — don't trust "upload complete" alone.
-
-## AWS approach (run near Neon + Filebase)
-
-Run export + upload from an **EC2 instance in us-east-1** (same region as Neon and
-Filebase) via **SSM Session Manager** — no SSH key, no open inbound ports.
-
-- IAM **role + instance profile** `elephant-publish-ssm` with the managed policy
-  `AmazonSSMManagedInstanceCore`.
-- Instance: **`c7g.2xlarge`** (Graviton3), **150 GB gp3**, **AL2023 arm64**
-  (`ami-06c84fbfd615657d3`), `DeleteOnTermination: true`.
-- User-data bootstrap: install **Node 22** via native `dnf install nodejs22` (no nvm / no
-  curl-pipe), clone the repo, `npm install`. See
-  `elephant-query-db/scripts/aws-publish-bootstrap.sh`.
-- Connect: `aws ssm start-session --target <instance-id>`.
-
-### ⚠️ AWS vCPU quota blocker (read this first)
-
-**New AWS accounts have an on-demand vCPU quota of `1`** for both:
-
-- Standard on-demand: `L-1216C47A`
-- Graviton on-demand: `L-34B43A08`
-
-A `c7g.2xlarge` needs **8 vCPUs** → `run-instances` fails with **`VcpuLimitExceeded`**.
-Quota-increase requests land in **`CASE_OPENED`** and take hours-to-days and need console
-approval — they are **not** instant.
-
-**Fallback = run on the laptop.** Keep it awake (`caffeinate -i -s`); export ~1–3 h,
-upload ~25–30 min. A laptop sleep kills the current step (the upload resumes from its
-checkpoint; the export restarts). The proper long-term fix is running in AWS once the
-quota is raised.
-
-> **⚠️ For BIG counties, run export + upload IN-REGION — the laptop is not a safe fallback.**
-> A trans-Atlantic connection to Neon/Filebase saturates and the socket pool exhausts
-> local ephemeral ports, so export/upload dies mid-run with **`EADDRNOTAVAIL`** and a
-> truncated dataset — silent partial output that looks like success. Palm Beach hit this
-> from the laptop. If the vCPU quota blocks a `c7g.2xlarge`, run on any in-region box
-> (even a smaller in-region instance beats the laptop) rather than pushing a large export
-> across the Atlantic.
-
-### ECS Fargate `open-data-publish` cluster — the standing in-region runner (Orange, 2026-07)
-
-Big-county consolidation export **dies on the laptop** (`EADDRNOTAVAIL`, the cross-Atlantic
-socket exhaustion above). The durable answer is the standing **`open-data-publish` ECS
-Fargate cluster** (CFN stack `open-data-publish-stack`), which runs export + upload in-region.
-Per county, provision its **OWN** (never share — same fixed-key clobber risk as the bucket note):
-
-- **Filebase bucket** `elephant-oracle-open-data-<county>`.
-- **Secrets Manager secret** `open-data-publish/filebase-<county>` with keys
-  `S3_ENDPOINT` / `S3_BUCKET` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `FILEBASE_API_TOKEN`.
-  **`FILEBASE_API_TOKEN` must be a real, non-blank token** — a blank/stale one lets the upload
-  finish successfully while **silently skipping the IPNS pointer update**, so data lands in the
-  bucket but the county IPNS keeps resolving to the OLD CID (consumers read stale data).
-- **Task-def revision** whose container command is
-  `run-property-consolidation-export.ts --county <c> --shard-size 10000`, then
-  `FILEBASE_IPNS_LABEL=oracle-open-data-<county>` +
-  `upload-consolidation-to-filebase.ts --concurrency 64`.
-- Grant the county's secret ARN to the exec-role's `ReadTaskSecrets` inline policy —
-  **additively** (keep the DB secret + every other county's secret; do not replace the list).
-- Networking: subnet `subnet-0f1d2efb1cf3a92e5`, SG `sg-047ab4a3e4e76aaa9`, `assignPublicIp`.
-
-Separate buckets/IPNS/queries per county = zero data conflict; the only shared cost is extra
-Neon read load.
-
-> **⚠️ Fargate on-demand vCPU quota = 6** (`L-3032A538`). A default task is **4 vCPU**, so two
-> default tasks (`4 + 4`) exceed the quota → `VcpuLimitExceeded`. To publish a county
-> **alongside another county's already-running publish**, register the task-def at **2 vCPU**
-> (fits the free 2 under a running 4-vCPU task) — no quota bump needed.
-
-**Success signals (all must hold):** task exits `0`, log shows `upload_session_complete`
-with **0 failed**, IPNS bumped, and it prints the **INDEX CID + MANIFEST CID**. Then **confirm
-the IPNS actually advanced** — resolve `https://ipfs.filebase.io/ipns/oracle-open-data-<county>`
-and check it returns the freshly-printed INDEX CID (a "successful" upload with a blank token can
-leave the pointer stale — see the token warning above).
+- **A. `.env` quote-stripping** — see Step 1.
+- **B. Double export-dir prefix.** The manifest's `filePath` already includes the
+  export-dir prefix, so `join(exportDir, entry.filePath)` doubles it → `ENOENT` on the
+  first file. Build paths from the relative key (`properties/<uuid>.json`).
+- **C. Per-upload S3 middleware is NOT concurrency-safe.** Capturing the `x-amz-meta-cid`
+  header via a fixed-name deserialize middleware on the **shared** S3 client caused
+  `Duplicate middleware name` + cross-request contamination at `--concurrency > 1`.
+  Either trust the locally pre-computed CID, or attach the middleware to **each
+  `PutObjectCommand`'s own stack** (`command.middlewareStack.add`, isolated per call).
+  **Never add capture middleware to the shared client.**
+- **D. IPNS update `404`.** PUTting `/v1/ipns` with an `_id` key — that path doesn't
+  exist. The real API is `/v1/names`, **label-keyed**; symptom: upload succeeds,
+  `ipns_update_failed: … 404`, pointer never moves.
+- **E. Silent IPNS skip on an unset bearer.** With an empty token the run "succeeds" but
+  logs `skipping IPNS update`. The uploader now auto-derives the bearer from the S3 keys;
+  still, always confirm the final log shows the IPNS name bumped — never trust "upload
+  complete" alone.
 
 ## Verification
 
-### Pre-publish reconciliation: source → DB → export (do this before uploading)
+### Pre-publish reconciliation: source → DB → export (before the gate)
 
-Prove the export is complete and faithful for EVERY field, not just addresses, before you
-publish. Three cheap checks:
-
-1. **DB ↔ export, full counts (all properties).** For each `source_system` child table
-   (`taxes, sales_histories, structures, layouts, lots, utilities, ownerships, deeds, files,
+1. **DB ↔ export, full counts.** For each `source_system` child table (`taxes,
+   sales_histories, structures, layouts, lots, utilities, ownerships, deeds, files,
    property_valuations, geometries, flood_storm_information`) compare the DB count
-   (`WHERE source_system='<county>_appraiser'` — these tables carry their own `source_system`,
-   so no join needed) to the aggregate array length summed across all exported property JSONs.
-   **DB == export exactly** ⇒ the export is lossless AND there are zero orphaned child rows
-   (an orphan would make DB > export). Mismatch ⇒ stop, do not publish.
-2. **Source (S3) ↔ DB ↔ export, ~12 random folios.** Each property row carries
-   `source_artifact_uri` → the S3 `transformed_output.zip`. For a sample of folios, count the
-   data files per class in the zip (`tax_N.json`, `sales_N.json`, `deed_N.json`, `file_N.json`,
-   `layout_N.json`, `structure_N.json`, `lot.json`, `utility.json`, `geometry.json`,
-   `flood_storm_information.json`; owners are `person_N.json` **or** `company_N.json` — count
-   both) and assert S3 count == DB rows for that `property_id` == export array length. This is
-   the true source proof. (`relationship_*`/`fact_sheet`/`property_seed` files are links, not
-   data — exclude them.)
-3. **Parent identity:** distinct folios (`request_identifier`) in `parcels` == source count
-   (see `query-db-loading-matching` — validate BY FOLIO, never the normalized parcel id).
+   (`WHERE source_system='<county>_appraiser'`) to the aggregate array length across all
+   exported JSONs. Exact equality ⇒ lossless AND zero orphaned child rows. Mismatch ⇒
+   stop.
+2. **Source ↔ DB ↔ export, ~12 random folios.** Each property row carries
+   `source_artifact_uri` → the `transformed.zip`. Count data files per class in the zip
+   (`tax_N.json`, `sales_N.json`, …; owners are `person_N.json` **or** `company_N.json` —
+   count both; `relationship_*`/`fact_sheet`/`property_seed` are links, exclude) and
+   assert zip count == DB rows == export array length.
+3. **Parent identity:** distinct folios in `parcels` == source count (BY FOLIO — see
+   `query-db-loading-matching`).
 
 ### Post-publish
 
-- `GET /v1/names` shows the label pointing at the expected index CID — and that CID **equals
-  the CID of the export's freshly-generated `index.json`** (`ipfs-only-hash` it locally and
-  compare). If they differ, IPNS is pointing at a stale/older index (classic bucket-reuse or
-  leftover-checkpoint symptom) — do not declare done.
-- Resolve `https://<ipns-name>.ipns.dweb.link/` → HEAD → `x-ipfs-roots` == index CID, and the
-  resolved index's `propertyCount` == the county's reconciled folio count (NOT a sample count).
-- Through the MCP: `listOracleProperties {limit:2}` returns real data and `total` ==
-  the published property count.
+- `GET /v1/names` shows the label at the expected index CID — and that CID **equals the
+  freshly-exported `index.json`'s CID** (`ipfs-only-hash` locally and compare). Differ ⇒
+  stale index (bucket-reuse / leftover-checkpoint symptom) — not done.
+- HEAD `https://<ipns-name>.ipns.dweb.link/` → `x-ipfs-roots` == index CID; resolved
+  index `propertyCount` == the reconciled folio count (NOT a sample count).
+- Through the MCP: `listOracleProperties {limit:2}` returns real data, `total` == the
+  published count.
 - **Re-publish proof:** set a bogus fixed index-CID env on the MCP and confirm data still
-  loads — proves it is coming via IPNS, not a hard-coded CID.
+  loads — proves it flows via IPNS, not a hard-coded CID.
 
 ## Related skills
 
-- `query-db-loading-matching` — loads the data this skill publishes. **Validate the
-  distinct-parcel count BY FOLIO (`request_identifier`) before publishing** — see that
-  skill's parcel-id normalization warning.
-- `monitoring-county-ingestion` — counts/ETAs for the upstream load.
+- `query-db-loading-matching` — loads the data this skill publishes; validate the
+  distinct-parcel count BY FOLIO before publishing.
+- `county-query-table-publish` — the Parquet query-table publish that consumes this
+  export's `manifest.json`.
+- `durable-workflow-builder` — the virtual-object, approval-gate, and self-scheduling
+  patterns the `Publish` object uses.

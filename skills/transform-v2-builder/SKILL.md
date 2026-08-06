@@ -1,6 +1,8 @@
 ---
 name: transform-v2-builder
 description: Help Elephant CLI users build, run, and debug transform v2 handler packages. Use when authoring or repairing county `handler.js` transform packages, using `elephant-cli transform --transform-version 2`, inspecting Browser Flow v2 captures, packaging `--transform-zip`, writing `writeJson`/`writeRelationship` calls, or validating transformed output.
+metadata:
+  author: elephant-xyz
 ---
 
 # Transform v2 Builder
@@ -156,6 +158,20 @@ unzip -l transformed-data.zip
 ```
 
 If expected files are missing, inspect whether the handler called `writeJson()` or `writeRelationship()` for them.
+
+### Unmapped source codes: skip-and-warn, never abort
+
+When a source code (e.g. a DOR use code) has no lexicon mapping, the handler must
+preserve the raw code in `source_payload`, emit a warning/flag on the field, and
+CONTINUE the parcel — never throw/abort the parcel over one unmapped code. A throw
+aborts the WHOLE parcel, and because one code often covers a whole property class,
+aborting once silently dropped entire condo classes from a county. Inventory the
+unmapped codes across a sample run and add the missing mappings before scaling.
+(This is the rule `county-appraisal-onboarding` cross-references.)
+
+- Address composition: never prepend `streetNumber` to a `propertyAddress` that already
+  includes it — the old pipeline produced `"5034 5034 LOYOLA LN"`. Regression-check a
+  sample of output for duplicated leading street numbers.
 
 ## Common Failures
 

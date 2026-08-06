@@ -40,40 +40,46 @@ Get usage-type spread from the seed CSV or county GIS export, not random samplin
 4. Fix (a) in the transform scripts and (b) in the browser flow; re-run until the only
    remaining gaps are class (c).
 5. For class (c) — lexicon gaps — do NOT drop data: keep it in `source_payload` and record
-   the gap in `oracle-node/docs/` (pattern: `../elephant-query-db/docs/open-lexicon-gaps.md`).
-   Lexicon expansion in `../lexicon` is a separate, deliberate follow-up.
-6. Schema check: transformed output must validate (the Minting branch's SVL step is the
-   strict validator; for archive-only runs, run validation locally via elephant-cli).
+   the gap (pattern: `../elephant-query-db/docs/open-lexicon-gaps.md`). Lexicon expansion
+   in `../lexicon` is a separate, deliberate follow-up.
+6. Schema check: transformed output must validate (`elephant-cli validate` locally on
+   every sample).
 7. Verify `county_jurisdiction` in output matches the county for every sample (transform
    script mismatches have produced wrong-county labels before).
 
-> ⚠️ **In-pipeline SVL gap (2026-06-24).** The `elephant-express` state machine historically
-> ran SVL **only on the `minting` branch**. The Structured Archive default AND the
-> property-first path (Lee fullcounty) skipped SVL — parcels were uploaded to S3, loaded to
-> Neon, and enqueued for permits **with no schema validation** (a "successful" but wrong
-> transform passed silently). Fixed by routing all non-minting parcels through the existing
-> SVL gate, fail-closed (oracle-node PR #171). **RULE: every transform output must pass SVL
-> before it is loaded/enqueued — validate per parcel, not only at the end of the run.** If you
-> add a new post-transform branch, route it through SVL too.
+> ⚠️ **Validation is fail-closed, per parcel, no exceptions per path.** A branch of the
+> old pipeline skipped schema validation for the non-minting paths — parcels were
+> uploaded, loaded to the query DB, and enqueued for permits with no schema validation
+> (a "successful" but wrong transform passed silently). In the current stack the
+> `Parcel.process` handler validates every parcel and excludes failures before the DB
+> row is written or permits are enqueued (`durable-workflow-builder`, fail-closed
+> validation gate). When reviewing the service, verify this gate exists; if you add a
+> new post-transform path, route it through validation too.
 
-## Validate the EXACT prefix that will load — reconcile folios BEFORE the Fargate load
+## Validate the EXACT artifact set that will load — reconcile folios BEFORE the load
 
 Coverage on a sample proves the extractor; it does NOT prove the batch you are about to
 load is complete. Before kicking off the load:
 
-- **Point the validation at the EXACT S3 prefix/batch the loader will read** — the same
-  `outputs/<jobId>/…` prefix and `transformed_output.zip` set, not a different/earlier
-  batch or a hand-picked sample. A run that validates prefix A but loads prefix B proves
-  nothing about what lands in Neon.
-- **Reconcile the distinct-folio (`request_identifier`) count of that prefix vs the source
-  seed count NOW**, before the load — not inside the multi-hour Fargate reload task. A
-  shortfall discovered mid-load means the whole task is wasted and must be redone; catch it
-  in a cheap S3 count first. (Fold in the documented un-scrapeable/dead tail: expect
-  `distinct folios == achievable`, per `county-ingest-run`.)
+- **Point the validation at the EXACT artifact set the loader will read** —
+  `data/artifacts/appraisal/<county>/<jobId>/`. The loader reads `ready.json`-marked
+  parcels only, so count the load set with
+  `find data/artifacts/appraisal/<county>/<jobId> -name ready.json | wc -l`; use
+  `find … -name transformed.zip | wc -l` only to measure total transform output (the
+  difference is the invalid/dead tail). Don't validate a
+  different/earlier jobId or a hand-picked sample. A run that validates one jobId dir but
+  loads another proves nothing about what lands in the DB.
+- **Reconcile the distinct-folio (`request_identifier`) count of that dir vs the source
+  seed count NOW**, before the load — count folio dirs or `ready.json` markers; a
+  shortfall discovered mid-load means the load must be redone; catch it in a cheap
+  `find` sweep first (see
+  `monitoring-county-ingestion`). Fold in the documented un-scrapeable/dead tail: expect
+  `distinct folios == achievable`, per `county-ingest-run`.
 
 ## Acceptance
 
-Record in `oracle-node/docs/<county>-county-findings.md`:
+Record in the county's findings doc in `Counties-trasform-scripts`
+(`<county>-county-findings.md`):
 
 - sample list (parcel ids + usage types)
 - field-coverage result per sample: extracted / total discoverable, with the class-(c)
@@ -81,7 +87,7 @@ Record in `oracle-node/docs/<county>-county-findings.md`:
 - assertion that no class-(a)/(b) gaps remain
 
 Only then proceed to `county-ingest-run`. If transform scripts changed, commit them on a
-branch and open a PR against `Counties-trasform-scripts` (`gh pr create`), then re-sync
-to S3 (deploy with `UPLOAD_TRANSFORMS=true` or the GitHub sync function) — the deployed
-worker uses S3, not your local checkout. Include the validation report and any comparison
-scripts in the same PR so the coverage evidence isn't lost.
+branch and open a PR against `Counties-trasform-scripts` (`gh pr create`), and keep
+`elephant-pipeline/transforms/<county>/` synced with the merged result — the `Parcel`
+service reads that local dir. Include the validation report and any comparison scripts
+in the same PR so the coverage evidence isn't lost.

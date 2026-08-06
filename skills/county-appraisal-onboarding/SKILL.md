@@ -1,22 +1,22 @@
 ---
 name: county-appraisal-onboarding
-description: Wire a new county's appraisal scraping into oracle-node - browser flow JSON, per-county prepare queue, per-county prepare flags, transform scripts from Counties-trasform-scripts, and appraisal-source throughput gates. Use when onboarding a county's property appraiser site, creating browser flows, or when prepare fails for a specific county.
+description: Wire a new county's appraisal scraping into the pipeline - browser flow JSON in elephant-pipeline/flows/, per-county prepare config and Parcel concurrency, transform scripts synced from Counties-trasform-scripts, and appraisal-source throughput gates. Use when onboarding a county's property appraiser site, creating browser flows, or when prepare fails for a specific county.
 metadata:
   author: elephant-xyz
 ---
 
 # County Appraisal Onboarding
 
-Goal: a workflow execution for one parcel of the new county completes Prepare → Transform
-→ Structured Archive.
+Goal: one parcel of the new county completes `Parcel.process` end to end — Prepare →
+Transform → Validate → Store.
 
 ## 1. Browser flow
 
 Prepare runs `elephant-cli prepare` against the appraiser site. If plain fetch works the
 flow may not need a browser; most counties need a Browser Flow v2 JSON.
 
-1. Check `oracle-node/browser-flows/` for an existing `<County>*.json` (Lee has
-   `LeeCurated.json`, `LeeCostCard.json` — use them as templates).
+1. Per-county flows live in `elephant-pipeline/flows/<County>.json`. Check for an existing
+   one; otherwise use another county's flow as a template.
 2. Author the flow: navigate → fill the parcel search input (selector from discovery) →
    submit → capture detail page(s) and any media/cost-card subpages. Capture as much of
    the site's data as possible — images and secondary tabs included; the Lee run's explicit
@@ -25,17 +25,21 @@ flow may not need a browser; most counties need a Browser Flow v2 JSON.
 
 ```bash
 npx elephant-cli prepare <parcel-or-url> \
-  --browser-flow <flow.json> --browser-flow-parameters '{"parcel_id":"..."}'
+  --browser-flow flows/<County>.json --browser-flow-parameters '{"parcel_id":"..."}'
 ```
 
-4. Per-county prepare flags (set at deploy, stored as env on the downloader):
-   `ELEPHANT_PREPARE_USE_BROWSER_<County>`, continue-button selector, captcha flags —
-   see `oracle-node/README.md` "Prepare function flags".
+4. Per-county prepare settings are plain config/env on the services process (read by
+   `services/parcel.ts`): `PREPARE_USE_BROWSER_<County>`, the county's flow file path,
+   continue-button selector, captcha flags. For every county-scoped env var in this
+   skill (`..._<COUNTY>` — prepare flags, concurrency caps, eligibility lists), the
+   `<COUNTY>` segment is the county slug uppercased with every non-alphanumeric run
+   replaced by `_` (`palm-beach` → `PALM_BEACH`) — the same `envPart()` rule as
+   `durable-workflow-builder` pattern 2.
 
-## 1b. Plain-HTTP counties (native fetcher / multi-request flow) — NOT every county needs a browser flow
+## 1b. Plain-HTTP counties (native fetcher) — NOT every county needs a browser flow
 
 If the appraiser exposes a plain-HTTP JSON API (probe for this FIRST — Palm Beach and Orange
-are examples), skip the browser flow. Set `ELEPHANT_PREPARE_USE_BROWSER_<County>=false`. There
+are examples), skip the browser flow. Set `PREPARE_USE_BROWSER_<County>=false`. There
 are two plain-HTTP mechanisms, and they interact:
 
 1. **Native county-specific fetcher** — hardcoded fetch logic in `@elephant-xyz/cli`
@@ -43,25 +47,33 @@ are two plain-HTTP mechanisms, and they interact:
    `county_jurisdiction`. Use this when the fetch needs logic a static flow can't express:
    response chaining (resolve a canonical id, then fetch by it), id normalization
    (e.g. zero-pad a stripped-leading-zero parcel id to the API's width), or retry-on-empty
-   (APIs that intermittently return `[]` for a valid id). Changes here are a `@elephant-xyz/cli`
-   PR + a downloader pin bump.
-2. **`multi-request-flows/<County>.json`** in the environment bucket — a static list of
-   independent templated requests (format: `oracle-node/multi-request-flows/Manatee-example.json`,
-   templated on `{{=it.request_identifier}}`). Good for simple "fetch N endpoints by id" APIs.
+   (APIs that intermittently return `[]` for a valid id). Changes here are a
+   `@elephant-xyz/cli` PR + a pin bump in `elephant-pipeline`. The CLI is SHARED across
+   counties: before bumping the pin, prove the dependency delta is scoped to the intended
+   county's fetcher, and after bumping, re-verify one parcel for each other onboarded
+   county.
+2. **Multi-request flow** — a static list of independent templated requests (templated on
+   `{{=it.request_identifier}}`), kept as a flow file in `elephant-pipeline/flows/`. Good
+   for simple "fetch N endpoints by id" APIs.
 
-⚠️ **A `multi-request-flows/<County>.json` OVERRIDES the native fetcher** (downloader precedence).
-If a county already has a native `<county>.ts` fetcher, do NOT add a flow file — it silently
+⚠️ **A multi-request flow file OVERRIDES the native fetcher** (prepare precedence). If a
+county already has a native `<county>.ts` fetcher, do NOT add a flow file — it silently
 bypasses the native logic and produces a shape the transform cannot read. Pick one path.
 
-## 2. Per-county prepare queue
+## 2. Per-county concurrency
 
-```bash
-./scripts/create-county-prepare-queue.sh <county_key>
-```
-
-This creates `<stack>-prepare-queue-<county_key>` with its own event-source mapping so the
-county's portal tolerance can be tuned independently (start `MaximumConcurrency` low,
-raise while watching errors — Lee sustained 50+, but only after burn-in).
+Each county's portal tolerance is tuned independently as a concurrency cap on the `Parcel`
+service. Gates are per-stage: `CONCURRENCY_PREPARE`, `CONCURRENCY_TRANSFORM`,
+`CONCURRENCY_PERMIT_<VENDOR>`. Independent per-county tuning means county-scoped gate
+names/env (e.g. `CONCURRENCY_PREPARE_LEE`) when counties run concurrently; the bare
+`CONCURRENCY_PREPARE` applies when one county runs at a time. Caps are NOT tunable in the Restate UI
+(server-side flow control is only a 1.7 preview behind experimental flags) — they are
+enforced as in-process semaphores in the services process, with limits from env vars. To
+change a cap, edit
+`.env` and restart the services process — safe mid-run, because in-flight invocations
+resume from their journals. Start low, then ramp while WATCHING error rates in the Web UI
+(`http://localhost:9070`); the UI observes, it does not tune. Lee sustained 50+, but only
+after burn-in. See `durable-workflow-builder` pattern 2 (the gate helper).
 
 Before scaling beyond smoke tests, use the `county-discovery` source-feasibility estimate
 or pilot timings from `county-ingest-run`. If the full appraisal download is estimated
@@ -71,18 +83,22 @@ the query DB, or move this source to runtime retrieval in an owning app.
 ## 3. Transform scripts (reuse first)
 
 County transform scripts live in `github.com/elephant-xyz/Counties-trasform-scripts`
-under `<county>/scripts/` (`data_extractor.js` + mapping modules), synced to S3 for the
-transform worker. The scripts-manager matches county-name variants (spaces, underscores,
-hyphens).
+under `<county>/scripts/` (`data_extractor.js` + mapping modules) and are synced into
+`elephant-pipeline/transforms/<county>/`. The synced sources are then BUILT into the
+county's v2 handler package `transforms/<county>/transform-v2.zip` (root `handler.js`;
+see `transform-v2-builder` for authoring and for wrapping legacy `data_extractor.js`
+modules), and the `Parcel` service's transform step resolves that package by county —
+it does not run the loose scripts. Re-package after every sync: the package hash
+recorded in `transformed.meta.json` is what triggers regeneration.
 
 1. If the county folder EXISTS: do not trust it blindly. Run the `validate-county-transform`
    skill against fresh prepare captures covering data variability. Fix gaps before scaling.
 2. If it does NOT exist: author a transform v2 handler package — use the
    `transform-v2-builder` skill — then validate the same way. New or changed scripts must
    be committed on a branch and PR'd to `Counties-trasform-scripts` (`gh pr create`) —
-   never left only in a local checkout or only synced to S3.
+   never left only in your local `transforms/` copy.
 3. The transform must emit `data/property.json` with `property_usage_type`; the
-   post-transform permit-eligibility branch reads it.
+   post-transform permit-eligibility step reads it.
 
    ⚠️ **Unmapped DOR use-code → warn + flag per record, NEVER throw-abort the parcel.**
    County DOR/usage codes map to lexicon enum values; a code the mapping doesn't know
@@ -94,36 +110,83 @@ hyphens).
    codes from a validation run and add the missing mappings before scaling; the run must
    never abort a parcel over one code. (This is the skip-and-warn rule the transform
    handlers must follow — see `transform-v2-builder`.)
-4. ⚠️ **The deployed S3 bundle `transforms/<county>.zip` can be STALE vs `Counties-trasform-scripts`
-   main — there is no auto-sync.** The transform worker runs the S3 bundle, not the repo. A stale
-   bundle silently uses old (possibly broken) extraction logic — Orange's deployed bundle was
-   months behind and crashed (`first is not defined`) while repo-main worked. ALWAYS sync the
-   bundle from main before running (`UPLOAD_TRANSFORMS=true` deploy / the GitHub sync fn, or as a
-   quick fix zip `<county>/scripts/*.js` and `aws s3 cp` to `transforms/<county>.zip`), and
-   confirm the deployed `data_extractor.js` matches main by hash (e.g. `sha256sum data_extractor.js`)
-   after any transform PR — a line count can match while content differs.
+4. ⚠️ **`transforms/<county>/` can be STALE vs `Counties-trasform-scripts` main — there is
+   no auto-sync.** Sync it (`git pull` in `Counties-trasform-scripts`, copy/link into
+   `transforms/`) before every run — the old pipeline shipped stale copies more than once,
+   silently running old (possibly broken) extraction logic while repo-main worked. When in
+   doubt, compare `sha256sum transforms/<county>/scripts/data_extractor.js` against the
+   repo copy — a line count can match while content differs.
 
 ## 4. Usage-type eligibility
 
 Collect the county's usage-type labels (from transform output, not from the portal UI) and
-decide the eligible set for property-first permit harvest. Configure via the
-`PROPERTY_FIRST_PERMIT_ELIGIBLE_USAGE_TYPES` env (CSV) on the transform and permit
-workers; defaults live in `workflow/lambdas/transform-worker/index.mjs` and
-`workflow/lambdas/permit-harvest-worker/index.mjs` and are keyed to LEE vocabulary — a new
-county almost certainly needs an override.
+decide the eligible set for property-first permit harvest. The services process is SHARED
+across counties, so resolution is county-scoped first:
+`PROPERTY_FIRST_PERMIT_ELIGIBLE_USAGE_TYPES_<COUNTY>` (uppercase county), falling back to
+the bare `PROPERTY_FIRST_PERMIT_ELIGIBLE_USAGE_TYPES` ONLY for explicitly single-county
+operation — changing the bare variable mid-redrive leaks into every concurrent county.
+Configure the env (CSV) on the services process; the
+defaults are keyed to LEE vocabulary — a new county almost certainly needs an override.
+The value is a CSV of eligible usage types, with two sentinels: `__ALL__` makes every
+parcel eligible (full permit coverage); `__NONE__` makes it an appraisal-only run (no
+permit harvesting). **Empty/unset silently falls back to the commercial default list —
+always set it explicitly.**
+
+Eligibility is computed **from the transformed output, not the seed row** — the usage
+type only exists after transform (`data/property.json` →
+`property_usage_type`). Concretely, the `Parcel` workflow's `writeEligibility` step reads
+the transformed artifact and persists `{eligible, usageType, policyFingerprint}` (the
+lib contract in `durable-workflow-builder`), which is why it runs post-transform and why
+`eligibility.json` appears alongside the transform outputs in the smoke test.
 
 ## 5. Smoke test
 
-Send one workflow message for one parcel (see `county-ingest-run` for message shape) and
-verify in order: prepare capture zip in S3 → transform artifact zip → structured-archive
-success event → eligibility manifest present. Use
-`npm run query-post-logs` and CloudWatch logs for the downloader/transform workers when
-debugging.
+Run ONE parcel through the `Parcel` service via the Restate ingress. Use `send` (not
+`call`): `Parcel.process` includes capture + transform and can run long (400-file
+parcels), so a synchronous `call` would sit blocked on the curl.
+
+```bash
+curl localhost:8080/restate/send/Parcel/process --json '{"county":"<county>","jobId":"smoke-1","parcel_id":"..."}'
+```
+
+Note the invocation id from the response, then check completion in the Web UI
+(`localhost:9070`) or block until done with
+`curl localhost:8080/restate/invocation/<id>/attach` before walking the artifact
+checklist below.
+
+Verify in order: `capture.zip` → `transformed.zip` → validation pass → DB row →
+`eligibility.json` under `data/artifacts/appraisal/<county>/smoke-1/<folio>/` (`ls` or
+`find`). Debug via the invocation journal in the Web UI (`localhost:9070`)
+and the services process logs.
+
+## Local repair loop
+
+Iterate on flows and transforms directly with elephant-cli before touching the service:
+`elephant-cli prepare` on the parcel, then `elephant-cli transform --transform-version 2`
+on the captured zip (see `transform-v2-builder` for the full loop). Only re-run
+`Parcel.process` once the local loop passes.
+
+## Deploying a fix
+
+Edit the code; in dev the services process restarts automatically (`npm run dev` runs tsx
+watch), and `--force` re-registration is fine while iterating. During a live run there is
+no "new deployment version" to hide behind — the pipeline is a single services process on
+one endpoint — so freeze the code. If a fix is unavoidable and replay-compatible (no
+journaled steps added/removed/reordered), apply it in place and `--force` re-register;
+otherwise cancel the affected invocations and re-run them as a redrive pass on the new
+code — see `durable-workflow-builder` authoring rule 2.
 
 ## Gotchas
 
+- Heavy parcels (400+ files) can exhaust file descriptors — `@elephant-xyz/cli` fans out
+  `fs.promises` reads with unbounded `Promise.all`, and macOS's default fd soft-limit is
+  256; raise it (`ulimit -n 4096`) in the shell that runs the services process
+  (`graceful-fs` cannot patch `fs.promises`). For heavy counties, also semaphore-wrap the
+  `fs.promises` fan-out (~128 in-flight) in the fetcher/CLI usage — at prepare
+  concurrency ~50 with 400-file parcels, even 4096 fds can exhaust.
 - Geo-blocking: some county portals block datacenter IPs; proxy rotation is supported via
-  `PROXY_FILE` (see README) and was needed intermittently for Lee.
+  `PROXY_FILE`/proxy config on the fetcher and was needed intermittently for Lee. Check
+  `curl -s ipinfo.io/country` returns `US` before debugging any scrape failure.
 - A transform-script county-name mismatch can silently produce wrong-county labels in
   output (the "Columbia county" incident) — verify `county_jurisdiction` in transformed
   output equals the expected county.
@@ -131,136 +194,3 @@ debugging.
   (e.g. a leading zero stripped by numeric storage) returns `[]` with no error, so the whole
   county comes back empty. Validate the seed `parcel_id` width/format up front and fail loud
   on a zero-result lookup — see `county-seed-data`.
-
-## Transform worker tuning (heavy parcels)
-
-The default `TransformWorkerFunction` config (512 MB / 300 s) is **too low for heavy
-parcels** (400+ data files in `output.zip`). Two failure modes observed in Lee full-county
-ingestion:
-
-| Failure | Root cause | Fix |
-|---------|-----------|-----|
-| 300 s TIMEOUT | 512 MB = too little CPU allocation; transform takes 30–180 s on arm64 at 512 MB | Bump MemorySize (more RAM = more vCPU) |
-| EMFILE "too many open files" | `@elephant-xyz/cli` reads via `fs.promises` with unbounded `Promise.all`, hitting Lambda's 1024-fd limit | Monkey-patch `fs.promises` with a semaphore (NOT `graceful-fs`) |
-
-**Production settings (in `prepare/template.yaml`, `TransformWorkerFunction`):**
-
-```yaml
-MemorySize: 10240  # was 512 (3008 is good; 10240 is max — use what the run needs)
-Timeout: 900       # was 300 — max allowed; covers worst-case heavy parcels
-```
-
-**EMFILE fix — why `graceful-fs` does NOT work here:**
-
-`graceful-fs.gracefulify()` only patches Node's callback-based and sync `fs` API.
-`@elephant-xyz/cli` uses `fs.promises` (async/await), which `graceful-fs` does NOT patch
-— so adding `graceful-fs` as a dependency and calling `gracefulify(require('fs'))` has
-zero effect on the EMFILE errors.
-
-**The real fix:** monkey-patch `fs.promises` directly in the transform worker at init
-time, before any other module is imported. Wrap `readFile`, `readdir`, `writeFile`,
-`stat`, `mkdir`, `rm`, and any other `fs.promises` methods the CLI uses with a
-concurrency-limited semaphore (~128 concurrent operations). Since `fs.promises` is a
-singleton object in the Node module graph, patching it in the worker entry point
-(`workflow/lambdas/transform-worker/index.mjs`) affects the same object that the CLI
-imports — no `createRequire` tricks needed.
-
-This is implemented in `oracle-node` on branch `fix/transform-worker-emfile-fd-limiter`.
-The fd-limiter utility lives at `workflow/lambdas/transform-worker/fd-limiter.mjs`.
-Import and call it as the very first statement in the worker before any other imports.
-
-**Deploy after any config change:**
-
-```bash
-AWS_PROFILE=elephant-oracle-node AWS_REGION=us-east-1 ./scripts/deploy-infra.sh
-```
-
-This runs `sam build` + `sam deploy` against `prepare/template.yaml` on stack
-`elephant-oracle-node`. The IaC change is the durable fix; a temporary CLI bump
-(`aws lambda update-function-configuration`) can be applied for immediate relief before
-the next deploy.
-
-## Surgical worker hotfix (when local sam build can't run)
-
-If `sam build` fails locally (e.g. nodejs22 unavailable, arm64 build env mismatch),
-hotfix the deployed Lambda bundle directly:
-
-1. **Download the deployed bundle:**
-   ```bash
-   # Get the signed S3 URL for the deployed code
-   aws lambda get-function --function-name <TransformWorkerFunctionName> \
-     --query 'Code.Location' --output text
-   # Download it
-   curl -o /tmp/transform-worker.zip "<url>"
-   ```
-2. **Swap the file:**
-   ```bash
-   cd /tmp && unzip transform-worker.zip -d tw-bundle
-   cp /path/to/oracle-node/workflow/lambdas/transform-worker/index.mjs tw-bundle/
-   # Add any new files (e.g. fd-limiter.mjs)
-   cp /path/to/oracle-node/workflow/lambdas/transform-worker/fd-limiter.mjs tw-bundle/
-   cd tw-bundle && zip -r /tmp/transform-worker-patched.zip .
-   ```
-3. **Upload via S3 (bundles >50 MB require S3, not direct upload):**
-   ```bash
-   aws s3 cp /tmp/transform-worker-patched.zip \
-     s3://<deployment-bucket>/hotfix/transform-worker-patched.zip \
-     --profile elephant-oracle-node
-   aws lambda update-function-code \
-     --function-name <TransformWorkerFunctionName> \
-     --s3-bucket <deployment-bucket> \
-     --s3-key hotfix/transform-worker-patched.zip \
-     --profile elephant-oracle-node --region us-east-1
-   ```
-4. **Verify** — invoke a test parcel, confirm EMFILE errors are gone.
-5. **Follow up** with a proper `sam deploy` as soon as the build env is available — the
-   hotfix is ephemeral and will be overwritten by the next deploy.
-
-### Dependency / pin bump on a SHARED function (e.g. DownloaderFunction @elephant-xyz/cli)
-
-When the change is a bumped dependency (a new `@elephant-xyz/cli` commit for the fetcher),
-not a source file, use the same surgical `update-function-code` — NEVER a full
-`deploy-infra.sh` (`sam`/CloudFormation) on the shared prepare stack (it touches every county
-and can roll back stale params — the permit-harvest-worker burn). Because npm **workspaces
-hoist deps**, a file swap is not enough — you must rebuild the dep in isolation and prove the
-delta. Proven recipe (Orange fetcher, 2026-07-02):
-
-All `aws` commands below MUST run with `--profile elephant-oracle-node --region us-east-1`
-(the production account) — omitting them silently targets your default profile/region.
-
-1. **Baseline = the DEPLOYED zip, not the working tree** (the tree has drift):
-   `aws lambda get-function --function-name <Fn> --query Code.Location --output text` → `curl` it
-   → unzip to `baseline/`. **Back it up to S3 with a UNIQUE, timestamped key** (never a fixed
-   path — a re-run would overwrite the only rollback artifact), rollback = `update-function-code`
-   with it:
-   ```bash
-   aws s3 cp baseline.zip \
-     "s3://<env-bucket>/deployments/<fn>-backup/<fn>-baseline-$(date -u +%Y%m%dT%H%M%SZ).zip" \
-     --profile elephant-oracle-node --region us-east-1
-   ```
-2. **Build a fresh isolated bundle**: copy the function's source dir, `npm install --omit=dev
-   --install-links` (gets the new dep + a consistent closure). Confirm the fix is in the built
-   dist (grep the compiled file).
-3. **Swap ONLY the changed dep into the baseline** (keep baseline's other transitive deps):
-   `cp -r baseline candidate; rm -rf candidate/node_modules/<dep>; cp -r
-   fresh/node_modules/<dep> candidate/node_modules/<dep>`.
-4. **Prove the delta**: `diff -rq baseline candidate` MUST show only `<dep>` (+ package.json).
-   Anything else = drift → stop. (Tip: the dep's own source diff between the deployed pin and the
-   new commit should be scoped — e.g. the Orange bump `44fd046→8dd5f01` net-diffed only
-   `orange.ts`, so other counties were byte-identical.)
-5. **Deploy** (zip candidate, upload, `update-function-code` — >50 MB must go via S3):
-   ```bash
-   (cd candidate && zip -rq ../candidate.zip .)
-   aws s3 cp candidate.zip "s3://<env-bucket>/deployments/<fn>-hotfix/<fn>.zip" \
-     --profile elephant-oracle-node --region us-east-1
-   aws lambda update-function-code --function-name <Fn> \
-     --s3-bucket <env-bucket> --s3-key deployments/<fn>-hotfix/<fn>.zip \
-     --profile elephant-oracle-node --region us-east-1
-   aws lambda wait function-updated --function-name <Fn> \
-     --profile elephant-oracle-node --region us-east-1
-   ```
-6. **Test ONE raw parcel** through the pipeline (`--limit 1`), confirm it reaches
-   `transformed_output.zip`, check the function's CloudWatch errors + DLQ.
-7. **Verify OTHER counties still work** — post-deploy their error types must be unchanged /
-   pre-existing (e.g. a pre-existing SF `Task Timed Out: Provided task does not exist anymore`
-   is an orphaned-token issue, NOT a deploy regression). Rollback with the backup zip if anything regresses.

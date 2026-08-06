@@ -1,34 +1,30 @@
 ---
 name: query-db-loading-matching
-description: Load county artifacts (appraisal, permits, Sunbiz, BBB) into the Neon Postgres query DB and cross-match records by parcel id and normalized address hash. Use when loading transformed data into Neon, reconciling row counts, linking permits or companies to parcels, or debugging missing query-db data.
+description: Load county artifacts (appraisal, permits, Sunbiz, BBB) from the pipeline data dir into the Postgres query DB and cross-match records by parcel id and normalized address hash. Use when loading transformed data into the query DB, reconciling row counts, linking permits or companies to parcels, or debugging missing query-db data.
 metadata:
   author: elephant-xyz
 ---
 
 # Query DB Loading & Matching
 
-The query DB is the `elephant-query-db` package (sibling repo): Drizzle schema on Vercel
-Neon, lexicon-aligned logical tables, full source data preserved in `source_payload`
-columns. Design docs: `../elephant-query-db/docs/{schema-design.md,
-data-load-and-matching-plan.md, lexicon-alignment.md, open-lexicon-gaps.md}`.
-
-Consumers (Vercel apps, dashboards) use the `use-elephant-query-db` skill; this skill is
-for the LOADING side.
+The query DB is the `elephant-query-db` package (sibling repo): Drizzle schema,
+lexicon-aligned logical tables, full source data preserved in `source_payload` columns.
+Design docs: `../elephant-query-db/docs/{schema-design.md, data-load-and-matching-plan.md,
+lexicon-alignment.md, open-lexicon-gaps.md}`. This skill is the LOADING side; publishing
+is `county-open-data-publish` / `county-query-table-publish`.
 
 ## Connection
 
-- Local scripts: `DATABASE_URL` from `../elephant-query-db/.env.local` (most oracle-node
-  scripts take `--env-file` defaulting to that path). Get it via
-  `vercel env pull --environment=development --scope elephant-xyz` on the `catalog`
-  project and use the **plain `DATABASE_URL`** (`ep-mute-leaf` Neon), NOT
-  `NEO_OPENDATA_DATABASE_URL` (`ep-snowy-union`, the deprecated NEO anti-pattern DB).
-  Prefer the **`_UNPOOLED`** endpoint for bulk `COPY`.
-- **AWS creds:** the loader scripts use the AWS SDK default credential chain and do NOT
-  accept `--profile`. Export `AWS_PROFILE=elephant-oracle-node AWS_REGION=us-east-1`
-  before running, e.g. `AWS_PROFILE=elephant-oracle-node AWS_REGION=us-east-1 npm run
-  load:bulk -- --tracks sunbiz`. Without this you get
-  `Could not load credentials from any providers`.
-- Lambdas: Secrets Manager ARN via `QUERY_DB_DATABASE_URL_SECRET_ARN`.
+- Everything is driven by **`DATABASE_URL`** — default is the local Postgres from
+  `elephant-pipeline/.env`: `postgresql://postgres:elephant@localhost:5432/elephant`.
+- The loader scripts are invoked by the `Loader` virtual object and read artifact
+  **files** from paths under `DATA_DIR` (`elephant-pipeline/data/`). If a loader script
+  is still S3-only today, it needs a thin filesystem read adapter — one line, don't dwell.
+- **Neon (optional):** a hosted Neon DB substitutes by swapping `DATABASE_URL` only — if
+  you do, use the **unpooled/direct** endpoint for bulk loads (COPY and the permanent
+  stage table need session semantics; the pooled proxy breaks both). Before a big merge
+  on Neon, raise compute autoscaling to 2–8 CU (at 1 CU the `ON CONFLICT` merge is
+  CPU-bound and becomes the bottleneck) and run the loader near the DB region.
 
 ## Loading principles (non-negotiable)
 
@@ -36,418 +32,291 @@ for the LOADING side.
    `elephant-query-db/src/loader/bulk.ts`, `permits.ts`). Any load must be safely
    re-runnable.
 2. **Deterministic keys** — **folio (`request_identifier`) for parcels/properties** (the
-   true 1:1 key; do NOT key on the digits-only normalized parcel id — it collapses
-   STRAPs with letters, see the parcel-id warning above); permit number + source for
-   permits; document number for Sunbiz.
+   true 1:1 key; do NOT key on the digits-only normalized parcel id — see below); permit
+   number + source for permits; document number for Sunbiz.
 3. **Keep `source_payload`** — never drop unmapped fields; lexicon gaps are logged in
    `open-lexicon-gaps.md`, not discarded.
+4. **Reconcile BEFORE loading** — count the loadable set with one cheap sweep
+   (`find data/artifacts/appraisal/<county>/<jobId> -name ready.json | wc -l`)
+   and compare to the seed row count. Count `ready.json` markers, not `transformed.zip` —
+   the marker is written only after validation passes (and removed on dead/invalid), so
+   it is fail-closed by construction. A load against an incomplete artifact set produces a
+   short DB that looks "done".
 
-## ⚠️ Parcel-id normalization collapses distinct parcels — key on the folio (2026-06-23)
+## ⚠️ Parcel-id normalization collapses distinct parcels — key on the folio
 
-**BUG.** The loader's `parcels` conflict key used the **digits-only normalized**
-`parcel_identifier`. `normalizeParcelIdentifier` strips **all non-digit characters**, and
-the conflict key was `(jurisdiction_key, parcel_identifier)`. This **silently collapses
-distinct parcels whose STRAP contains letters**:
+`normalizeParcelIdentifier` strips **all non-digit characters**. When the `parcels`
+conflict key was `(jurisdiction_key, parcel_identifier)`, distinct STRAPs containing
+letters silently collapsed: Lee condo units `…0001A/B/C` (different owners) → one row.
+Lee impact: 516,841 distinct STRAPs → 485,599 digits-only keys → **~31,242 parcels
+silently lost** plus 20,926 orphaned `properties` (parcel_id NULL). Fixed by keying
+`parcels` on the **folio (`request_identifier`)** + unique index; child tables already
+resolve their parent FK via the folio-based `source_record_key`.
 
-- Lee condo units `…0001A` / `…0001B` / `…0001C` (different owners) all normalize to
-  `…0001` → one row.
-- Mid-string letters `…9A0` / `…9B0` / `…9C0` all normalize to `…90` → one row.
+**RULE — validate by folio, never by normalized parcel id** (and never by raw parcel-id
+string compare — false mismatches). After a key fix, a **clean re-load is required**: a
+plain re-run keeps merging onto the already-collapsed rows.
 
-Lee impact: **516,841 distinct STRAPs → only 485,599 digits-only keys → ~31,242 distinct
-parcels silently lost.** True count ≈ **512,353**, not the **481,111** that loaded. It
-also produced **20,926 orphaned `properties` (parcel_id NULL)**.
+## ⚠️ Clean re-load: FK-safe clear — NEVER `TRUNCATE … CASCADE` the shared tables
 
-**FIX (branch `fix/parcel-id-folio-key`, elephant-query-db).** Key `parcels` on the
-**folio (`request_identifier`)** — the true 1:1 unique key — plus a unique index. Child
-tables already resolve their parent FK by the folio-based `source_record_key`, so this
-aligns parents and children on the same key.
+`addresses`, `companies`, `people` are **shared** across all tracks (Sunbiz/BBB FK into
+them) and the permit child tables FK into `property_improvements`. A `TRUNCATE CASCADE`
+on shared/parent tables once wiped Sunbiz (379,449) + BBB (2,619) + all permit children —
+recovered only via point-in-time restore.
 
-**RULE — validate by folio, never by normalized parcel id.** Always validate the
-distinct-parcel count vs source **BY FOLIO (`request_identifier`)**. Do **not** compare on
-the normalized `parcel_identifier`, and do **not** raw-string-compare the parcel id — a
-raw string compare gives false mismatches. After applying the key fix, a **clean re-load
-is required**: a plain re-run keeps colliding on the old key (merges are idempotent, so
-they update the already-collapsed rows instead of un-collapsing them).
+**RULE — clear by source, in reverse FK order, batched** (`clear-appraisal-source.ts`):
 
-## ⚠️ Clean re-load: FK-safe clear — NEVER `TRUNCATE … CASCADE` the shared tables (2026-06-24)
+- `DELETE … WHERE source_system='<county>_appraiser'` per appraisal table, in the
+  **reverse** of `APPRAISAL_TABLE_ORDER`, **skipping `addresses`/`companies`/`people`**
+  (orphaned shared rows are harmless — every child FK into them is `ON DELETE SET NULL`;
+  the idempotent merge re-handles them).
+- Deleting `property_improvements` by `source_system` is safe (doesn't touch permit-source
+  rows). Never delete it by parcel/property.
+- **Batch the deletes** (`ctid LIMIT 50000` in a loop) — the child tables are huge
+  (`property_valuations` ~14.8M rows); one statement locks tens of millions of rows.
+- **Perf:** `property_improvements` deletes FK-cascade-check the 6 permit child tables;
+  without an index on their `property_improvement_id` column that's a scan per delete
+  (~50k rows / ~6 min observed). Add those FK-column indexes before a large clear.
 
-A clean re-load needs the appraisal slate emptied first. **Do NOT `TRUNCATE … CASCADE`.**
-`addresses`, `companies`, `people` are **shared** across all tracks: Sunbiz/BBB FK into them,
-and the permit child tables (`permit_links`/`events`/`fees`/`contacts`/`custom_fields`,
-`inspections`) FK into `property_improvements`. A `TRUNCATE CASCADE` on the shared/parent
-tables wiped **Sunbiz (379,449) + BBB (2,619) + all permit children** — recovered only via a
-Neon point-in-time restore. (The naive "truncate the 20 appraisal tables" list is itself
-unsafe: it includes `property_improvements`, which permits depend on.)
+## The `Loader` virtual object — single-writer per county
 
-**RULE — clear by source, in reverse FK order, batched:**
-- `DELETE … WHERE source_system='lee_appraiser'` per appraisal table, in the **reverse** of
-  `APPRAISAL_TABLE_ORDER`, **skipping `addresses`/`companies`/`people` entirely** (leave the
-  shared rows; the idempotent merge re-handles them; orphaned shared rows are harmless —
-  every child FK into them is `ON DELETE SET NULL`).
-- Deleting `property_improvements WHERE source_system='lee_appraiser'` is safe — it does NOT
-  touch the `lee_accela` rows the permit children cascade off. Never delete it by parcel/property.
-- **Batch the deletes** (chunk via `ctid LIMIT 50000` in a loop): the appraisal child tables
-  are huge (`property_valuations` ~14.8M, `layouts` ~5.5M, `files` ~3.3M) — a single statement
-  locks tens of millions of rows. Batched = bounded + resumable.
-- Ready-made: `elephant-query-db/scripts/clear-appraisal-source.ts`.
-- **Perf gotcha:** deleting `property_improvements` is the slow step — each row delete does an
-  FK-cascade check against the 6 permit child tables (`permit_links`/`events`/`fees`/`contacts`/
-  `custom_fields`, `inspections`), and without an index on their `property_improvement_id` FK
-  column that's a scan per delete (observed ~50k rows / ~6 min on prod). Add those FK-column
-  indexes (or VACUUM/analyze) before a large clear to avoid a multi-hour `property_improvements`
-  delete.
+All bulk loads route through the **`Loader` virtual object keyed by county**
+(`services/loader.ts` in `elephant-pipeline`; see `durable-workflow-builder` pattern 8).
+Author `services/loader.ts` per `durable-workflow-builder` pattern 8 first — the curl
+invocations below target code you have written, not a prebuilt service.
 
-## Running the re-load durably — serial Fargate, not the laptop, not EC2 (2026-06-24)
+Division of labor: **`Parcel.process` upserts only the per-parcel property row**
+(streaming, single-row); **`Loader` owns staging + every multi-row merge** into
+parent/child tables from artifacts.
 
-The full re-load is multi-hour. Don't run it on a laptop (sleep/network = lost run).
+- **The serial constraint is a domain fact:** the appraisal loader interleaves stage+merge
+  and writes the shared parents (`addresses`/`companies`/`people`/`parcels`). Running two
+  loads for one county **in parallel deadlocks on those parents** (cause of an earlier
+  ~30k-parcel loss). The virtual object makes serialization structural: two loads for the
+  same county queue behind each other; loads for **different counties run in parallel**.
+  No advisory locks, no "is another run active?" checks.
+- **Bulk reload** = one **`Loader.load`** invocation running **migrate → clear → load →
+  validate** as `ctx.run` steps. The canonical payload is job-scoped — the county comes
+  from the object key, and the Loader DERIVES `jurisdictionKey` and the job's artifact
+  prefix from the key + `jobId` (payload-supplied values that differ are rejected with
+  `TerminalError`):
+  `{"jobId":"<jobId>","tracks":["appraisal"],"step":"all","skipClear":<see below>}`.
+  `skipClear` distinguishes the two load modes — `true` only for a county's INITIAL
+  load; `false` for any EXISTING-county reload (the clear runs as its own journaled
+  step). A `step` argument selects a single phase for read-only
+  smoke tests (e.g. `{"step":"validate"}`) — use synchronous `/restate/call/` for those
+  so the caller gets the validation outcome; keep fire-and-forget `/restate/send/` for
+  the real multi-hour bulk reload:
 
-- **EC2 is blocked** on the oracle-node account: on-demand **and** Spot vCPU are both capped at
-  **1**; every other family **0**. A quota case may be open but ungranted — don't wait on it.
-- **Fargate has a separate quota (6 vCPU, available)** and no 15-min limit (the clear + serial
-  merge move tens of millions of rows — too heavy for Lambda).
-- **The load MUST stay serial.** The appraisal loader interleaves stage+merge per batch and
-  writes the shared parents (`addresses`/`companies`/`people`/`parcels`). **Running it in
-  parallel deadlocks on those parents** — that is the cause of the earlier ~30,851-parcel loss.
-  So: ONE Fargate task, the existing loader unchanged, `--batch-size 20000`.
-- **Pattern shipped:** `elephant-query-db/infra/appraisal-reload/` — pure-CloudFormation SAM
-  app (ECS Fargate + Step Functions), `Dockerfile.reload`, entrypoint
-  (`scripts/reload-appraisal-entrypoint.sh`: migrate → clear → load → validate, with a `STEP`
-  env for read-only smoke tests). DB URL via Secrets Manager; use the **direct/unpooled**
-  `ep-mute-leaf` endpoint (COPY + the permanent stage table need session semantics).
-- **Gotchas:** the IAM user lacks the SAM serverless-transform macro → use **pure CloudFormation**
-  (no `Transform:`). `package-lock.json` is out of sync (missing esbuild) → the Dockerfile uses
-  `npm install`, not `npm ci`. Fargate `command` overrides become *args* to an `ENTRYPOINT`
-  (they don't replace it) → drive single steps via the `STEP` env, not a command override.
-- **The Fargate wrapper was Lee-hardcoded even after the loader (#9) became county-generic
-  (fixed 2026-07-01).** Two landmines: (a) the entrypoint's `build_load_args` didn't pass
-  `--jurisdiction-key`, so the loader fell back to its `lee_appraiser` default and **wrote a new
-  county's parcels under Lee's namespace** (collision on `(jurisdiction_key, request_identifier)`);
-  (b) `clear-appraisal-source.ts` deleted a hardcoded `source_system='lee_appraiser'`, so a new-county
-  run's clear step **would wipe Lee**. Now county-generic + multi-track:
-  - `JURISDICTION_KEY` scopes the clear (`CLEAR_SOURCE_SYSTEM` overrides it), the loaded rows
-    (`--jurisdiction-key`), and the folio validation (`validate-appraisal-folio.ts` now counts
-    `parcels WHERE source_system = JURISDICTION_KEY`, not a global count). Default `lee_appraiser`.
-  - `TRACKS` (default `appraisal`) → `--tracks`; optional `SUNBIZ_PREFIX`/`BBB_PREFIX` →
-    `--sunbiz-prefix`/`--bbb-prefix`, so ONE task can load appraisal+sunbiz+bbb for a county.
-  - `EXPECT_LETTER_STRAPS` (default `true`, Lee) gates the letter-STRAP regression guard; set `0`
-    for numeric-folio counties (e.g. Palm Beach) or validate false-fails on `letter_straps == 0`.
-  - `template.yaml` params `JurisdictionKey`/`Tracks`/`SunbizPrefix`/`BbbPrefix`/`SkipClear`/
-    `ExpectLetterStraps` wire straight into the container env. **All defaults preserve Lee byte-for-byte.**
-- **Initial load of a NEW county:** set `JURISDICTION_KEY=<county>_appraiser`, use `SKIP_CLEAR=1`
-  (a fresh county has nothing to clear and the loader upsert is idempotent — never clear with
-  another county's key), and override `APPRAISAL_PREFIX` + `EXPECTED_PARCELS`. e.g. Palm Beach:
-  `JURISDICTION_KEY=palm_beach_appraiser SKIP_CLEAR=1 EXPECT_LETTER_STRAPS=0`
-  `APPRAISAL_PREFIX=outputs/palm-beach-property-first-seed/palm-beach-property-first-seed-all-20260630/`
-  `EXPECTED_PARCELS=654530`; add sunbiz+bbb with `TRACKS=appraisal,sunbiz,bbb` + their prefixes.
-- **RE-loading an EXISTING county** (e.g. after a folio-key fix): do NOT use `SKIP_CLEAR` — run the
-  clear with that county's `JURISDICTION_KEY` set (it clears only that `source_system`) so stale rows
-  are removed first; skipping it would merge on top of stale data.
+  ```bash
+  # read-only smoke test (synchronous — returns the validation result)
+  curl localhost:8080/restate/call/Loader/<county>/load \
+    --json '{"jobId":"<jobId>","tracks":["appraisal"],"step":"validate"}'
+
+  # INITIAL load of a NEW county (fire-and-forget) — skipClear:true, nothing to clear
+  curl localhost:8080/restate/send/Loader/<county>/load \
+    --json '{"jobId":"<jobId>","tracks":["appraisal"],"step":"all","skipClear":true}'
+
+  # EXISTING-county reload (fire-and-forget) — skipClear:false, the FK-safe clear
+  # runs first as its own journaled step
+  curl localhost:8080/restate/send/Loader/<county>/load \
+    --json '{"jobId":"<jobId>","tracks":["appraisal"],"step":"all","skipClear":false}'
+  ```
+
+  Multi-hour steps are fine — no platform hard cap once the service's inactivity/abort
+  timeouts are raised (Restate's defaults abort-and-retry a handler stuck ~11 min inside
+  one `ctx.run`; see `durable-workflow-builder` authoring rule 3) — steps are journaled;
+  if the services process dies, restart it and the invocation resumes at the interrupted
+  step (keep the laptop awake with `caffeinate -i -s`, or accept the pause and resume).
+- **County parameterization:** the county slug in the object key is hyphenated
+  (`palm-beach`) and the Loader derives the underscore DB form (`palm_beach_appraiser`)
+  itself — never hand-build `jurisdictionKey` from the hyphen slug. That derived
+  `jurisdictionKey` scopes the clear, the
+  loaded rows (`--jurisdiction-key`), and the folio validation
+  (`validate-appraisal-folio.ts` counts `parcels WHERE source_system = <key>`). The
+  `parcels` conflict key is `(jurisdiction_key, request_identifier)` — a wrong key
+  cross-contaminates counties. `tracks` (default `appraisal`) plus optional
+  sunbiz/bbb prefixes let one invocation load all tracks. `expectLetterStraps` gates the
+  letter-STRAP regression guard — set false for numeric-folio counties or validation
+  false-fails on `letter_straps == 0`.
+- **Initial load of a NEW county:** `skipClear: true` (nothing to clear; the upsert is
+  idempotent — never clear with another county's key). **RE-loading an EXISTING county**
+  (e.g. after a key fix): do NOT skip the clear — run it with that county's
+  `jurisdictionKey` so stale rows go first; skipping merges on top of stale data.
+- **On success** the handler calls **`Publish.requestPublish()`** on the county's
+  `Publish` object (`ctx.objectSendClient`) — no flag files, no polling.
 
 ## Load paths
 
-- **Permits**: loaded inline by the permit-harvest worker per parcel (`loadToNeon`). For
-  bulk/backfill loads use the loader scripts in `elephant-query-db`.
-- **Appraisal**: from Structured Archive transform artifacts, per
-  `data-load-and-matching-plan.md`. (A `query-db-loader-worker` Lambda is scaffolded in
-  oracle-node but not implemented — bulk loads are currently script-driven.)
-- **Sunbiz / BBB**: staged JSONL → loader scripts in `elephant-query-db`.
+- **Permits**: harvesters only write artifacts — after each completed chunk,
+  `PermitFeed` submits `Loader.load({jobId, tracks:["permits"], step:"incremental"})`,
+  so the `Loader` owns permit merges (single-writer) and its watermark covers both the
+  appraisal and permits tracks. Bulk/backfill via the loader scripts (see city-portal
+  JSONL below).
+- **Appraisal**: from transform artifacts under
+  `data/artifacts/appraisal/<county>/<jobId>/`, per `data-load-and-matching-plan.md`.
+- **Sunbiz / BBB**: staged JSONL under
+  `data/artifacts/enrichment/sunbiz/<quarter>/<county>/` (classes under
+  `.../business-registration-v1/classes/`) and `data/artifacts/enrichment/bbb/<jobId>/`
+  → loader scripts, `--sunbiz-prefix` / `--bbb-prefix`.
 
-## County parameterization (multi-county)
+## Paths & listing
 
-- **Pass `--jurisdiction-key <county>_appraiser` to BOTH `run-data-load.ts` and
-  `run-bulk-data-load.ts`** (default is `lee_appraiser`). The `parcels` conflict key is
-  `(jurisdiction_key, request_identifier)`, so the wrong key cross-contaminates counties.
-- **Property-first 2-level outputs** (`row-N/<uuid>/`) load via `load:bulk` (recursive),
-  NOT `load:data`.
-- **Filebase upload checkpoint is per-bucket** — it was a single shared file → cross-county
-  contamination; scope the checkpoint by bucket.
-- **Geometry caveat:** confirm the transform's geometry output (`geometry_*.json`) actually
-  maps into the `geometries` table at load — a Palm Beach pilot load wrote `geometries: 0`.
-  If empty, fix the loader mapping, else NEO has no maps.
+- **Always pass the county/jobId-scoped subdir**
+  (`data/artifacts/appraisal/<county>/<jobId>/`). NEVER point a load at the shared
+  multi-county `data/artifacts/appraisal/` root — it is millions of files across counties
+  and the loader refuses it. Never narrow a full-county load with a scope manifest either.
+- **One sweep, not per-parcel stats:** `listAppraisalArtifacts` does ONE `find`-style
+  sweep over the scoped dir filtered on names ending `ready.json` (the validated-loadable
+  marker — `transformed.zip` exists before validation, so enumerating it would load
+  invalid/dead parcels; fail-closed means no marker, no load) — the old
+  per-parcel stat-in-a-loop ran ~6.6 artifacts/s (~21 h for 501k) vs ~100/s for a single
+  sweep (**~80× faster**). Keep it one sweep.
+- Property-first 2-level outputs (`row-N/<uuid>/`) load via `load:bulk` (recursive), not
+  `load:data`.
+- **Geometry caveat:** confirm `geometry_*.json` actually maps into the `geometries`
+  table at load — a pilot load once wrote `geometries: 0`, and empty geometries = no maps
+  downstream.
 
-## Lee source prefixes & gotchas (verified 2026-06-22)
+## Disk-bounded batch mode
 
-The loader CLI defaults are stale for Lee full-county. Always pass explicit prefixes:
+A full county staged into one CSV once hit **106 GB and killed the disk**. Use
+`--batch-size N` (default **20000**; `0` = legacy single-CSV): each batch stages → COPY →
+merges all tables → drops the stage table → **deletes the CSV**. Peak disk = one batch CSV
+(~1–2 GB). A checkpoint file
+(`$DATA_DIR/staging/loader/<county>/<jobId>/appraisal-batch-checkpoint-n<N>.json`, named
+by batch size) tracks completed batches, so re-running the same command resumes
+automatically — merges are idempotent. Batch CSVs stage under the same
+`$DATA_DIR/staging/loader/<county>/<jobId>/` dir.
 
-- **Appraisal** — full-county run jobId = `lee-fullcounty-20260619`. Transformed artifacts
-  live at `outputs/lee-property-first-seed/lee-fullcounty-20260619/row-<N>-folio-<folio>-parcel-<id>/<uuid>/transformed_output.zip`
-  — i.e. **two** child levels (`row-N/` then `<uuid>/`) below the jobId, not one.
-  `listAppraisalArtifacts` in `run-bulk-data-load.ts` was **fixed (2026-06-22, branch
-  `fix/appraisal-two-level-nesting` in elephant-query-db)** to perform a SINGLE flat
-  recursive S3 listing (filter keys ending in `transformed_output.zip`) instead of
-  per-row Delimiter listings. The per-row approach produced ~6.6 artifacts/s (~21 h for
-  501k); flat listing produces ~100/s (~80x faster).
-  NEVER use bare `--appraisal-prefix outputs/` — it is the shared multi-county namespace
-  (~11.1M folders) and the loader refuses it.
-  NEVER use `--scope-manifest` for full-county — it narrows to a subset.
-- **Sunbiz** — `--sunbiz-prefix permit-harvest/sunbiz-lee-corporate-quarterly-2026q2-expanded/lexicon-transform/business-registration-v1/classes/`
-  (this default is correct; 379,467 `business_registration` records).
-- **BBB** — the CLI default `permit-harvest/bbb/category-data/browser-harvest-v1/profiles/`
-  is **EMPTY**. Real Lee BBB profiles (2,619, harvest complete) are at
-  `--bbb-prefix permit-harvest/bbb/category-data/lee-county-permit-seeded/profiles/`.
-- **Coverage snapshot of `lee-fullcounty-20260619` (2026-06-22):** 516,848 row folders,
-  501,496 with `output.zip` (prepare), **431,339 with `transformed_output.zip`** — i.e.
-  ~85.5k parcels still need a transform redrive (~70k transform-only, ~15k re-prepare).
-  Do the redrive through `county-ingest-run` before declaring appraisal complete.
-
-## Appraisal bulk loader — disk-bounded batch mode (2026-06-22)
-
-The full `lee-fullcounty-20260619` run (431k artifacts) staged everything into one
-local CSV that hit **106 GB and killed the disk** (`ENOSPC`). Fixed with a
-`--batch-size N` flag (default **20000**, `0` = legacy single-CSV).
-
-In batch mode the appraisal track processes N artifacts at a time:
-stage → COPY → merge all tables → drop stage table → **delete CSV** → next batch.
-Peak local disk = one batch CSV (~1-2 GB), never 106 GB.
-
-Checkpoint file `appraisal-batch-checkpoint-n<N>.json` in the stage dir tracks
-completed batch indices so re-runs resume from the first incomplete batch.
-File is named by batch-size to prevent collisions between verify runs and production.
-
-**Full Lee county appraisal load command:**
 ```bash
-cd /path/to/elephant-query-db
-nohup env AWS_PROFILE=elephant-oracle-node AWS_REGION=us-east-1 \
-  pnpm run load:bulk -- \
-  --tracks appraisal \
-  --appraisal-prefix "outputs/lee-property-first-seed/lee-fullcounty-20260619/" \
-  --batch-size 20000 \
-  --concurrency 32 \
-  >> .loader-runs/appraisal-batch-load.log 2>&1 &
+cd ../elephant-query-db
+npm run load:bulk -- --tracks appraisal \
+  --appraisal-prefix "appraisal/<county>/<jobId>/" \
+  --jurisdiction-key <county>_appraiser \
+  --batch-size 20000 --concurrency 32
 ```
 
-**Monitor:**
-```bash
-grep -a '"event".*batch' .loader-runs/appraisal-batch-load.log | tail -20
-ls -lh .loader-runs/bulk-staging/   # should have at most 1 CSV at a time
-df -h .                              # disk must NOT drop toward 0
-```
+All loader `--*-prefix` values are relative to `data/artifacts/` (the loader joins them
+to `DATA_DIR`) — hence `appraisal/<county>/<jobId>/`, not a `data/artifacts/…` path.
 
-**Resume after interruption:** re-run the same command — the checkpoint file skips
-already-committed batches automatically. Merges are idempotent (ON CONFLICT DO UPDATE).
+Monitor: batch events in the log, at most 1 CSV in the staging dir, `df -h` not falling.
 
-Branch: `feat/appraisal-disk-bounded-batch-loader` (elephant-query-db)
+## Robustness (survive connection drops)
 
-## Bulk loader robustness — EPIPE fix (2026-06-22)
+- Every `pg.Client` sets `keepAlive: true` (proxied/hosted DBs drop idle connections
+  between COPY and the first merge; local Postgres doesn't care but it's free).
+- **Permanent stage table** (`public.elephant_bulk_stage_<ts>`), not TEMP — TEMP is
+  session-scoped and gone on disconnect.
+- **Per-table commits** — each logical table merges in its own `BEGIN/COMMIT` on a fresh
+  client; a per-table checkpoint file (under
+  `$DATA_DIR/staging/loader/<county>/<jobId>/`) lets a re-run skip committed tables.
+- `--stage-table <name>` resumes the merge phase against an already-COPY'd stage table,
+  skipping COPY.
 
-The original monolithic `BEGIN → COPY 6.5 GB → merge-all → COMMIT` failed with
-`write EPIPE` after ~26 minutes: Neon's proxy drops TCP connections idle for >5 min,
-and the connection went quiet in the gap between COPY completion and the first merge.
+## Merge performance (three parts, all required)
 
-**What was changed in `elephant-query-db/scripts/run-bulk-data-load.ts`:**
+1. **Single-column indexes on `source_record_key`** for every parent table (`addresses`,
+   `parcels`, `properties`, `property_improvements`, `companies`, `people`, `deeds`) —
+   the composite unique indexes have it trailing, so FK-resolution joins can't seek. Use
+   `CREATE INDEX CONCURRENTLY` (safe on a live load); see
+   `migrations/0004_bulk_merge_perf_indexes.sql`.
+2. **Session planner hints** before each merge — `SET work_mem TO '128MB'` (kills disk
+   spill) AND `SET random_page_cost TO 1.1` (SSD; the default 4 forces Hash joins even
+   with the indexes). Both together flip the plan to index seeks: join CTE 20,874 ms →
+   **270 ms**.
+3. **VACUUM ANALYZE** parent tables after mass inserts — clears visibility maps so
+   index-only scans stop heap-fetching.
 
-1. **TCP keepalive** — every `pg.Client` now has `keepAlive: true`,
-   `keepAliveInitialDelayMillis: 10_000`. `connectionTimeoutMillis` and
-   `idleTimeoutMillis` on `Pool` do NOT prevent Neon's proxy teardown.
-
-2. **Permanent stage table** — instead of `CREATE TEMP TABLE … ON COMMIT PRESERVE ROWS`,
-   the loader creates `public.elephant_bulk_stage_<timestamp>` (a real table). TEMP tables
-   are session-scoped and are gone if the connection drops; the permanent table survives.
-
-3. **Per-table commits** — each logical table (e.g. `addresses`, `companies`,
-   `business_registrations`) is merged in its own `BEGIN/COMMIT` on a fresh keepalive
-   `Client`. No single transaction spans more than one table's merge.
-
-4. **Checkpoint file** — after each table commits, the table name is written to
-   `<stageDir>/<stageTableName>-checkpoint.json`. A re-run automatically skips
-   already-committed tables (safe idempotent resume).
-
-5. **`--stage-table` flag** — pass an existing permanent stage table name to skip the
-   COPY entirely and resume only the merge phase. Useful when COPY succeeded but a merge
-   failed later.
-
-**Re-run after partial failure:**
-```bash
-# Point at the existing stage file (re-runs COPY + merge with checkpointing):
-AWS_PROFILE=elephant-oracle-node AWS_REGION=us-east-1 npm run load:bulk -- \
-  --tracks sunbiz \
-  --phase load \
-  --stage-file .loader-runs/bulk-staging/<existing>.csv
-
-# OR reuse the already-COPY'd permanent stage table (skips COPY, merges only):
-AWS_PROFILE=elephant-oracle-node AWS_REGION=us-east-1 npm run load:bulk -- \
-  --tracks sunbiz \
-  --phase load \
-  --stage-file .loader-runs/bulk-staging/<existing>.csv \
-  --stage-table elephant_bulk_stage_<timestamp>
-```
-
-## Appraisal batch merge — index and planner hints (2026-06-23)
-
-**Problem:** Each 20k-parcel batch was taking 20–30 min. The FK-resolution JOIN in
-`buildBulkMergeSql` probes parent tables on `source_record_key` alone, but the existing
-unique indexes are composite `(source_system, source_record_key)`. `source_record_key`
-is the trailing column, so it cannot serve as an index-seek probe — the planner falls back
-to parallel Hash Joins with full table scans. With default `work_mem=4MB` and
-`random_page_cost=4`, the addresses hash (979k rows) spilled across 16 disk batches:
-18,178 ms just for that one join. Total join CTE: **20,874 ms per batch**.
-
-**Fix — three parts, all required:**
-
-1. **Single-column indexes** on every parent/reference table (`addresses`, `parcels`,
-   `properties`, `property_improvements`, `companies`, `people`, `deeds`). Use
-   `CREATE INDEX CONCURRENTLY` — safe on a live running load:
-   ```sql
-   CREATE INDEX CONCURRENTLY IF NOT EXISTS addresses_source_key_only_idx
-     ON public.addresses (source_record_key);
-   -- repeat pattern for parcels, properties, property_improvements, companies, people, deeds
-   ```
-   See `elephant-query-db/migrations/0004_bulk_merge_perf_indexes.sql` for all 7 indexes.
-
-2. **Session planner hints** in `mergeOneTable()` — set BOTH before each merge, not just one:
-   ```ts
-   await client.query("SET work_mem TO '128MB'");     // eliminates disk spill
-   await client.query("SET random_page_cost TO 1.1"); // Neon = NVMe SSD; default 4 forces Hash
-   ```
-   The indexes alone are not enough: with `random_page_cost=4` the planner still chooses
-   Hash joins. Both settings together make it pick Nested Loop + index seeks.
-
-3. **VACUUM ANALYZE** on parent tables after mass inserts — clears dirty visibility maps,
-   reducing heap fetches from ~46k to near zero for index-only scans.
-
-**Result:** join CTE 20,874 ms → **270 ms (~77× speedup)**.
-
-**Remaining floor:** `INSERT … ON CONFLICT` into `taxes` / `property_valuations` (5M rows,
-8–10 GB each, ~675k rows/batch) is IO-bound unique-index maintenance. This is a Neon CU
-throughput issue, not a query-plan issue — more CU helps; planner hints don't.
-
-Branch: `feat/appraisal-disk-bounded-batch-loader`, commit `7ccf61a` (elephant-query-db).
-
-## Neon compute — merge bottleneck at scale
-
-The Neon endpoint used for loading (query-db default endpoint, `ep-mute-leaf`) was
-fixed at **1 CU** by default. At 1 CU the `ON CONFLICT DO UPDATE` merge for 400k+
-rows is the primary bottleneck. Raise autoscaling to **2–8 CU** in the Neon console
-before a big merge run, then scale back after. The proper long-term fix is running the
-loader in AWS (Lambda or EC2 in the same region as Neon), not on a laptop where
-network latency compounds the merge time.
+The remaining floor is `ON CONFLICT` unique-index maintenance on the multi-GB tables
+(`taxes`, `property_valuations`) — IO-bound, not plan-bound.
 
 ## Cross-source matching
 
-Order of confidence (from `data-load-and-matching-plan.md`):
+1. **Parcel id** — normalize both sides (appraiser vs permit-portal formats differ). The
+   primary join.
+2. **Normalized address hash** — fallback when parcel ids are absent (Sunbiz, BBB). Only
+   write FK links at high confidence; leave low-confidence candidates unlinked for review.
+3. **Permit→parcel caution:** link permits from the harvest request's target parcel
+   evidence (`propertyFirstTarget`), not the parcel displayed on the permit page — portals
+   sometimes display related/different parcels (caused a Lee repair job).
 
-1. **Parcel id** — normalize both sides (strip punctuation/spacing; counties differ in
-   appraiser vs permit-portal formats). This is the primary join.
-2. **Normalized address hash** — fallback when parcel ids are absent (Sunbiz, BBB).
-   Heuristic: only write FK links at high confidence; otherwise leave candidates
-   unlinked for review.
-3. **Permit→parcel linking caution**: link permits using the harvest request's target
-   parcel evidence (`propertyFirstTarget`), not the parcel displayed on the permit page —
-   permit portals sometimes display related/different parcels (caused a Lee repair job).
+## Reconciliation gotchas (hard-won)
 
-## Orange County gotchas (2026-07)
-
-- **`files` + `ownerships` merge LAST in `APPRAISAL_TABLE_ORDER`.** Mid-load they read **0** —
-  that is **timing, not a gap**: each merges only at the tail of its batch, so they fill in as
-  batches finish. Don't "fix" a zero count for these two while a load is still running; recheck
-  after it completes.
-- **Dead tail = genuine non-resolver folios, reconcile as `seed − dead tail`.** Some seed
-  folios are OCPA "Quick search returned empty" (the source itself has no record) and never
-  resolve. They're deterministic — re-scraping recovers **~0**. So the target row count is
-  `seed − dead tail`, not `seed`. Orange: **490,529 − 972 = 489,557**. ⚠️ **Prove every excluded
-  folio is a genuine source-empty BEFORE trusting the reduced target** — a loader/transform
-  failure wrongly counted as "dead tail" silently drops real properties. For each excluded
-  folio confirm all three: it has only `seed_output.zip` (no `output.zip`), its Downloader log
-  says `Quick search for parcel … returned [empty]`, and a re-scrape recovers **~0**. Anything
-  that is NOT a clean source-empty is a **drop to investigate**, not dead tail. Only then
-  reconcile to 489,557.
-- **⚠️ Address-doubling transform bug (Orange class) — delete the OLD pre-fix outputs.** If the
-  appraisal transform prepends `streetNumber` when `propertyAddress` **already** contains it,
-  the address doubles: `"5034 5034 LOYOLA LN"`. Fixing it is three steps, and the third is the
-  one people miss: (1) fix the transform, (2) transform-only-redrive, (3) **delete the OLD
-  pre-fix `transformed_output.zip` outputs**. Each parcel now has BOTH the old-doubled and the
-  new-clean output, and the bulk loader reads **ALL** outputs and upserts on
-  `(jurisdiction_key, request_identifier)` — **last-write-wins by arbitrary S3 order**, so
-  unless you delete the pre-fix zips the doubled address can win. **Which to delete:** the old
-  and clean zips are distinguishable by S3 `LastModified` (old = original-scrape date, clean =
-  redrive date) — but the robust rule is **keep the NEWEST `transformed_output.zip` per parcel,
-  delete the rest**. **Dry-run first** and assert: (a) every delete key is a
-  `transformed_output.zip` under the county's outputs prefix, (b) **0 parcels end up with zero
-  outputs**, and (c) every KEPT output is dated the redrive day. Only then delete. (Orange:
-  738,203 old/dup deleted, 0 parcels emptied, all 489,557 kept were redrive-dated.)
+- **`files` + `ownerships` merge LAST in `APPRAISAL_TABLE_ORDER`** — mid-load they read 0.
+  Timing, not a gap; recheck after the load completes.
+- **Dead tail:** some seed folios are genuinely source-empty and never resolve; the target
+  is `seed − dead tail`, not `seed`. ⚠️ **Prove every excluded folio is a clean
+  source-empty first** (raw capture shows the empty-search result AND a re-scrape recovers
+  ~0) — a transform failure miscounted as dead tail silently drops real properties.
+- **LEGACY-IMPORT-ONLY — duplicate outputs from the old pipeline's per-attempt layout.**
+  In the local pipeline this cannot happen: each parcel has ONE deterministic
+  `transformed.zip`, atomically regenerated in place on redrive — no duplicates exist.
+  It applies only when importing historical data produced by the old pipeline, where a
+  post-fix redrive left each parcel with both old and new `transformed.zip` and the bulk
+  loader read ALL outputs with **last-write-wins by arbitrary listing order**. When
+  importing such data: keep the NEWEST `transformed.zip` per parcel, delete the rest.
+  Dry-run first and assert: every deleted path is a `transformed.zip` under the county's
+  subdir, 0 parcels end up with zero outputs, every kept output is redrive-dated.
 
 ## Verification queries
 
-After any load, reconcile:
+Always reconcile distinct parcels **BY FOLIO** vs the seed count:
 
-**Always validate distinct parcels BY FOLIO** (`request_identifier`) vs the source seed
-count — never by the normalized `parcel_identifier` (collapses STRAPs with letters) and
-never by raw parcel-id string compare (false mismatches). E.g. for Lee: expect ~512,353
-distinct folios, not 481,111.
-
-```sql
--- distinct parcels by the TRUE key (folio), compare to source seed count
-SELECT count(DISTINCT request_identifier) FROM parcels WHERE jurisdiction_key = '<county>';
--- orphan check (the normalization bug produced 20,926 of these for Lee)
-SELECT count(*) FROM properties WHERE parcel_id IS NULL;
-
--- per county/run
-SELECT count(*) FROM properties WHERE county = '<county>';
-SELECT count(*) FROM permits p JOIN properties pr ON p.property_id = pr.id WHERE pr.county = '<county>';
--- recent insert rate (monitoring)
-SELECT count(*) FROM permits WHERE created_at > now() - interval '10 minutes';
+```bash
+docker compose exec postgres psql -U postgres elephant -c \
+  "SELECT count(DISTINCT request_identifier) FROM parcels WHERE jurisdiction_key='<county>_appraiser';"
 ```
 
-Compare against S3 artifact counts and the seed row count; investigate any gap before
-declaring a run complete. Check actual table/column names in
-`elephant-query-db/src/schema/` — the schema evolves with the lexicon.
+Also: orphan check (`properties WHERE parcel_id IS NULL`), per-county property/permit
+counts, recent insert rate (`created_at > now() - interval '10 minutes'`). Compare against
+the artifact listing and the seed row count; investigate any gap before declaring a run
+complete. Check actual names in `elephant-query-db/src/schema/` — the schema evolves with
+the lexicon. Once counts validate by folio, the next step is `county-open-data-publish`.
 
-Once counts validate by folio, the next step is `county-open-data-publish` (export to
-IPFS + IPNS for MCP/NEO consumption).
+## City-portal permits — normalized-JSONL bulk load
 
-## City-portal permits — normalized-JSONL bulk load (2026-07-09, Santa Clara)
+Counties whose permits come from **city portals** produce normalized snake_case JSONL,
+not per-permit detail JSON. Loading them (verified with Santa Clara, 98,592 permits):
 
-Counties whose permits come from **city portals** (San Jose, Palo Alto, …) produce
-**normalized snake_case JSONL**, not the Lee/Accela per-permit detail JSON the bulk
-loader originally expected. Loading them (verified with Santa Clara, 98,592 permits):
-
-1. **Stage the JSONL files to a load prefix** in the env bucket — the loader lists a
-   prefix, it does not take local files:
-   `aws s3 cp <city>-permits-normalized.jsonl s3://<env bucket>/open-data/<county>/permits-load/`
-   (one file per city is fine; the loader lists every `.jsonl` under the prefix).
-2. **Run the permits track with the normalized format** (needs elephant-query-db
-   PR #27, `mapNormalizedCityPermit` + `--permit-format`):
-
-   ```bash
-   AWS_PROFILE=elephant-oracle-node AWS_REGION=us-east-1 npm run load:bulk -- \
-     --tracks permits \
-     --permit-format normalized-jsonl \
-     --permit-prefix open-data/<county>/permits-load/ \
-     --permit-source-system <county>_permits
-   ```
-
+1. Stage the JSONL into a job-scoped load dir — the loader sweeps a directory, not
+   arbitrary files, and the path must stay inside the `<county>/<jobId>/` namespace:
+   `cp <city>-permits-normalized.jsonl data/artifacts/permits/<county>/<jobId>/permits-load/`.
+2. `npm run load:bulk -- --tracks permits --permit-format normalized-jsonl
+   --permit-prefix permits/<county>/<jobId>/permits-load/ --permit-source-system <county>_permits`.
 3. **`--permit-source-system` MUST start with the county's underscore slug**
-   (`santa_clara_permits`, not `sanjose_permits`) — the permit-table export filters
-   permits by `source_system LIKE '<county>_%'`; a name without the county prefix
-   loads fine but silently vanishes from the published permit table. The
-   `SourceSystem` type accepts any `` `${string}_permits` ``.
-4. **Verify** with the standard queries above (permit count by county join, and
-   parcel-match rate — normalized permits link by parcel id first, address hash
-   fallback).
-5. **Publish the updated permit table** through the county's running
-   `incremental-county-publish` execution — do NOT re-run a manual export. The
-   machine's trigger is the **S3 flag object**
-   `s3://<env bucket>/incremental-status/<county>/publish-pending.json` set to
-   `{"pending":true}` (it is NOT an SSM parameter — writing SSM does nothing). If
-   the publish execution isn't running, start it with the FULL input from
-   `county-ingest-run` — `{"county": "<county>", "statusBucket": "<env bucket>",
-   "waitSeconds": 3600}`; omitting `statusBucket` fails at runtime with
-   `States.Runtime` on `$.statusBucket`.
+   (`santa_clara_permits`, not `sanjose_permits`) — the permit-table export filters by
+   `source_system LIKE '<county>_%'`; a wrong prefix loads fine but silently vanishes
+   from the published table.
+4. Verify with the standard queries (permit count by county join + parcel-match rate),
+   then call `Publish.requestPublish()` for the county — do NOT re-run a manual export.
 
-Repo gotcha found the same day: `elephant-query-db/.gitignore` had an unanchored
-`coverage/` rule that silently excluded `src/coverage/` from commits (the
-`oracleDatasetCoverage.ts` module was missing from `main` and broke typecheck on fresh
-clones). Rule is now anchored as `/coverage/`; if a fresh clone fails typecheck on a
-missing module, check `.gitignore` before assuming a bad merge.
+## Streamed alternative — incremental load
 
-## Streamed alternative — the incremental-county LOAD machine
+To load a county **as its ingestion run produces artifacts** instead of one batch at the
+end, the trigger is **event-driven**: each completed `IngestChunk` sends a job-scoped
+`Loader.load` (`step:"incremental"`, with the job's `jobId` — the artifact prefix is
+derived from the object key + `jobId`). The `Loader` keeps a **content-aware watermark**
+over the artifact prefix: it tracks merged **(path, artifact-hash) pairs** (hash from
+`ready.json`/`transformed.meta.json`), with the hash index on disk under
+`$DATA_DIR/staging/loader/<county>/<jobId>/`. The consequence: an in-place transform
+redrive (same path, new hash) IS picked up and re-merged; a path-only watermark would
+skip corrections. Two more merge rules: **ready-hash gate** — a parcel is loaded only
+when the hash in its `ready.json` matches `transformed.meta.json` (`transform()`
+removes `ready.json` before regenerating, so a mid-regeneration parcel is simply not
+loadable yet); and **tombstone consumption** — the incremental merge also consumes
+invalid/dead tombstones and deletes/downgrades the previously loaded rows (without
+this, a parcel that went invalid after loading lives on in the DB). The `watermark_<track>` state fields are
+`{ prefix, mergedCount, lastMergedAt, hashIndexPath }`. On each send it
+merges only NEW artifacts, then requests publish — no timer is involved
+(`durable-workflow-builder` pattern 10 covers only the Publish tick). Same loader, same
+idempotent merges, same folio key. A manual bulk load
+during streaming can't deadlock (same object key ⇒ they queue), but it duplicates work —
+let the watermarked incremental sends pick up the new artifacts instead.
 
-The bulk/script loads here are for backfills and reconciliation. To load a county **as its
-ingestion run produces artifacts** (instead of one batch at the end), use the
-`incremental-county-load` Step Function — a source-agnostic, watermarked loop that merges
-only NEW artifacts each cycle and signals the paired publish machine. It is driven from
-`county-ingest-run` §3d "Streamed load + publish"; infra + execution contract live in
-`elephant-query-db/infra/incremental-county/`. Same loader, same idempotent merges, same
-folio key — just watermarked and continuous. Don't run a manual bulk appraisal load for a
-county while its incremental LOAD execution is active (they fight the loader's advisory lock
-and duplicate work).
+**Watermark + publish-gate visibility.** The `Loader` object persists per-track
+watermark state (`watermark_<track>`, readable via `restate sql "SELECT * FROM state
+WHERE service_name = 'Loader' AND service_key = '<county>'"`); the `Publish` object
+persists `approved`, `tickScheduled`, and `lastTickAt`. These state reads are how the
+wrap-up gates (watermark covers final artifacts; tick ran after last load) are actually
+verified.
