@@ -94,6 +94,7 @@ npx skills add elephant-xyz/skills --all -y
 | `deploy-open-data-mcp` | Run your own stateless open-data MCP serving the published data via IPNS — per-consumer, no shared backend |
 | `sunbiz-corporate-ingest` | Florida statewide Sunbiz corporate bulk ingest + lexicon transform |
 | `bbb-harvest` | BBB contractor category harvest for reputation/quality enrichment |
+| `overture-places-ingest` | County-clipped Overture business/POI locations with taxonomy, source-licence, Neon coverage, and dedicated IPFS publication gates |
 | `transform-v2-builder` | Author/repair county transform handler packages for elephant-cli transform v2 |
 
 ## Conventions
