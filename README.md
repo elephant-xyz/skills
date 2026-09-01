@@ -96,6 +96,21 @@ npx skills add elephant-xyz/skills --all -y
 | `bbb-harvest` | BBB contractor category harvest for reputation/quality enrichment |
 | `overture-places-ingest` | County-clipped Overture business/POI locations with taxonomy, source-licence, Neon coverage, and dedicated IPFS publication gates |
 | `transform-v2-builder` | Author/repair county transform handler packages for elephant-cli transform v2 |
+| `use-elephant-mcp` | Operating guide for exploring published Oracle open-data and Overture places through the `elephant` MCP server |
+
+## Agents
+
+These are routing definitions, not procedures. Skills hold the how-to.
+
+| Agent | Purpose |
+|---|---|
+| [`agents/oracle.md`](./agents/oracle.md) | Routes onboard / ingest / refresh / publish work to the skills above |
+| [`agents/donphan.md`](./agents/donphan.md) | Explores published county data through MCP tools only |
+
+An example Cursor MCP config lives at [`mcp.json`](./mcp.json). County maps in that file
+are generated from `oracle-node/catalog/published-counties.json` — see the
+`use-elephant-mcp` skill. This repo is not a Cursor plugin; paste the example into the
+client's MCP config.
 
 ## Conventions
 
